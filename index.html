@@ -54,6 +54,25 @@ button.rb.dan{color:#b91c1c}
 tr:hover button.rb,button.rb:focus{opacity:1}
 td[data-pres]{position:relative}
 td[data-pres]::before{content:attr(data-pres);position:absolute;top:0;right:0;font-size:10px;line-height:1.3;background:#fef3c7;color:#92400e;padding:0 4px;pointer-events:none;white-space:nowrap}
+table.pt{border-collapse:collapse;width:100%;margin:2px 0}
+table.pt td{border:0;padding:3px 10px;white-space:pre-wrap;word-break:break-all;font-size:13px}
+table.pt td.ed{min-height:22px;height:22px}
+table.pt td.rh,table.ht td.rh,table.ht td.ch{border:1px solid #e4e4e4;padding:0}
+table.pt td.rh{width:30px;padding:0}
+table.ht tr.chd td{height:18px;font-size:11px}
+td.ch{background:#f3f4f6!important;text-align:center;white-space:nowrap}
+td.ch.nr{background:#ecfdf5!important}
+td.rh{width:48px;min-width:48px}
+table.pt td.rh{width:48px}
+button.rb.mk{color:#6b7280}
+tr.delm td:not(.rh),td.delm,div.tw.delm table{text-decoration:line-through;opacity:.45}
+.ubar{margin:14px 0 4px;padding:6px 10px;background:#eef2ff;border-left:4px solid #4f46e5;font-weight:600;font-size:13px;border-radius:4px}
+.ubar.mine{background:#dcfce7;border-color:#16a34a}.ubar.taken{background:#f3f4f6;border-color:#9ca3af;color:#6b7280}
+td.ed.ulock{background:#f3f4f6!important;color:#9ca3af!important;cursor:not-allowed}
+td.rh.ulock .rb,td.ch.ulock .rb,div.twh.ulock .rb{display:none}
+.hidedel tr.delm,.hidedel div.tw.delm,.hidedel td.delm{display:none}
+div.twh{margin:6px 8px 0;font-size:11px}
+div.twh .muted{font-size:11px}
 </style>
 </head>
 <body>
@@ -405,8 +424,13 @@ function mapRefs(f, own, fn) {
       const name = sh ? sh.slice(0, -1).replace(/^'|'$/g, '').replace(/''/g, "'") : own;
       const n1 = fn(name, a1 === '$', +r1, false, !!c2);
       if (n1 === null || n1 === undefined) return m;
+      if (n1 === -1) return '#REF!';
       let out = (sh || '') + d1 + c1 + a1 + n1;
-      if (c2) { const n2 = fn(name, a2 === '$', +r2, true, true); out += ':' + d2 + c2 + a2 + (n2 === null || n2 === undefined ? r2 : n2); }
+      if (c2) {
+        const n2 = fn(name, a2 === '$', +r2, true, true);
+        if (n2 === -1 || (n2 !== null && n2 !== undefined && n1 > n2)) return '#REF!';
+        out += ':' + d2 + c2 + a2 + (n2 === null || n2 === undefined ? r2 : n2);
+      }
       return out;
     });
   }).join('');
@@ -505,6 +529,73 @@ function applyRowOps(wb, rows) {
   });
   return ops;
 }
+/* 삭제 표시된 행을 실제로 삭제 (다운로드용). keys: 'xr_{시트번호}_{원래 행번호 | 추가 행 id}' */
+function deleteMarkedRows(wb, ops, keys) {
+  const bySi = {};
+  (keys || []).forEach(k => { const m = /^xr_(\d+)_(.+)$/.exec(k); if (m) (bySi[+m[1]] = bySi[+m[1]] || []).push(m[2]); });
+  const del = {};
+  Object.keys(bySi).forEach(si => {
+    if (!wb.worksheets[+si]) return; const o = ops[+si], rs = new Set();
+    bySi[si].forEach(k => { const r = /^\d+$/.test(k) ? (o ? o.F[+k] : +k) : (o ? o.pos[k] : null); if (r) rs.add(r); });
+    if (rs.size) del[+si] = [...rs].sort((a, b) => a - b);
+  });
+  if (!Object.keys(del).length) return;
+  const byName = {}; Object.keys(del).forEach(si => { byName[wb.worksheets[+si].name] = del[si]; });
+  const below = (arr, r) => { let n = 0; for (const d of arr) { if (d < r) n++; else break; } return n; };
+  const mapFor = (name, abs, r, isEnd, isRange) => {
+    const arr = byName[name]; if (!arr) return null;
+    let q = r; const gone = arr.includes(r);
+    if (gone && !isRange) return -1;
+    if (gone) { if (isEnd) { while (q > 0 && arr.includes(q)) q--; } else { while (arr.includes(q)) q++; } }
+    const v = q - below(arr, q); return v < 1 ? -1 : v;
+  };
+  const fms = wb.worksheets.map(ws => { const list = []; ws.eachRow({ includeEmpty: false }, (row, r) => row.eachCell({ includeEmpty: false }, (cell, c) => {
+    try { if (cell.type === ExcelJS.ValueType.Formula && !(cell.value && cell.value.shareType === 'array')) { const f = cell.formula; if (f) list.push({ r, c, f, res: cell.value && typeof cell.value === 'object' ? cell.value.result : undefined }); } } catch (e) { }
+  })); return list; });
+  const keep = {};
+  wb.worksheets.forEach((ws, si) => {
+    const arr = del[si]; if (!arr) return;
+    const merges = ((ws.model && ws.model.merges) || []).slice(); merges.forEach(m => { try { ws.unMergeCells(m); } catch (e) { } });
+    const dvOld = Object.assign({}, ws.dataValidations && ws.dataValidations.model || {}), cf = (ws.conditionalFormattings || []).slice();
+    const hts = [], hid = []; for (let r = 1; r <= (ws.rowCount || 1); r++) { const rw = ws.getRow(r); hts[r] = rw.height; hid[r] = rw.hidden; }
+    keep[si] = { merges, dvOld, cf, hts, hid, total: ws.rowCount || 1 };
+    for (let i = arr.length - 1; i >= 0; i--) ws.spliceRows(arr[i], 1);
+  });
+  wb.worksheets.forEach((ws, si) => {
+    const arr = del[si];
+    fms[si].forEach(x => {
+      if (arr && arr.includes(x.r)) return;
+      const nr = arr ? x.r - below(arr, x.r) : x.r;
+      ws.getCell(nr, x.c).value = { formula: mapRefs(x.f, ws.name, mapFor), result: x.res };
+    });
+  });
+  wb.worksheets.forEach((ws, si) => {
+    const arr = del[si]; if (!arr) return; const { merges, dvOld, cf, hts, hid, total } = keep[si];
+    for (let r = 1, n = 0; r <= total; r++) { if (arr.includes(r)) continue; n++; const rw = ws.getRow(n); rw.height = hts[r]; rw.hidden = !!hid[r]; }
+    const nxt = r => { while (r <= total && arr.includes(r)) r++; return r; }, prv = r => { while (r >= 1 && arr.includes(r)) r--; return r; };
+    const nm = r => r - below(arr, r);
+    merges.forEach(m => {
+      const [a, b] = m.split(':'), pa = a1ToRC(a), pb = b ? a1ToRC(b) : pa, r1 = nxt(pa[0]), r2 = prv(pb[0]);
+      if (r1 > r2 || r1 > total || r2 < 1) return; try { ws.mergeCells(nm(r1), pa[1], nm(r2), pb[1]); } catch (e) { }
+    });
+    const dvNew = {}; Object.keys(dvOld).forEach(addr => { const dv = dvOld[addr]; if (!dv) return; const p = a1ToRC(addr); if (arr.includes(p[0])) return; dvNew[colLetter(p[1]) + nm(p[0])] = dv; });
+    if (ws.dataValidations) ws.dataValidations.model = dvNew;
+    const outCf = [];
+    cf.forEach(x => {
+      try {
+        const refs = String(x.ref).split(/\s+/).map(t => {
+          const m = /^(\$?)([A-Z]+)(\$?)(\d+)(?::(\$?)([A-Z]+)(\$?)(\d+))?$/.exec(t); if (!m) return t;
+          const r1 = nxt(+m[4]), r2 = m[8] ? prv(+m[8]) : r1; if (r1 > r2 || r1 > total) return null;
+          return m[1] + m[2] + m[3] + nm(r1) + (m[6] ? ':' + m[5] + m[6] + m[7] + nm(r2) : '');
+        }).filter(Boolean);
+        if (!refs.length) return; x.ref = refs.join(' ');
+        (x.rules || []).forEach(q => { if (q.formulae) q.formulae = q.formulae.map(f => typeof f === 'string' ? mapRefs(f, ws.name, mapFor) : f); });
+        outCf.push(x);
+      } catch (e) { outCf.push(x); }
+    });
+    if (ws.conditionalFormattings) { ws.conditionalFormattings.length = 0; outCf.forEach(x => ws.conditionalFormattings.push(x)); }
+  });
+}
 /* 셀 키 주소 ↔ 표시 주소. 키: 원래 주소("B12") 또는 추가 행("B@행ID") */
 function keyToAddr(addr, op) {
   const m = /^([A-Z]+)(?:(\d+)|@(.+))$/.exec(addr); if (!m) return null;
@@ -547,12 +638,12 @@ async function renderXlsx(bytes, sheet, ro) {
       for (let r = ca.row; r <= cb.row; r++) for (let c = ca.col; c <= cb.col; c++) if (r !== ca.row || c !== ca.col) covered.add(r + ',' + c);
     });
     const R = Math.min(ws.rowCount || 1, 500), C = Math.min(ws.columnCount || 1, 60);
-    let cols = gut ? '<col style="width:30px">' : '';
+    let cols = gut ? '<col style="width:48px">' : '';
     for (let c = 1; c <= C; c++) { const col = ws.getColumn(c); if (col.hidden) continue; cols += `<col style="width:${Math.round((col.width || 8.43) * 7 + 5)}px">`; }
     let h = `<table class="xt"><colgroup>${cols}</colgroup>`;
     for (let r = 1; r <= R; r++) {
       const row = ws.getRow(r); if (row.hidden) continue;
-      const trs = `<tr style="height:${row.height ? Math.round(row.height * 1.33) : 20}px">`, kr = (op && op.keyOf[r]) || r;
+      const kr = (op && op.keyOf[r]) || r, trs = `<tr data-mk="xr_${si}_${kr}" style="height:${row.height ? Math.round(row.height * 1.33) : 20}px">`;
       let rh = '', rowEd = false;
       for (let c = 1; c <= C; c++) {
         if (ws.getColumn(c).hidden || covered.has(r + ',' + c)) continue;
@@ -583,7 +674,7 @@ async function renderXlsx(bytes, sheet, ro) {
       let gh = '';
       if (gut) {
         const meta = typeof kr === 'string' && op ? op.meta[kr] : null, mine = meta && ro.uid && meta.by === ro.uid;
-        gh = `<td class="rh${meta ? ' nr' : ''}" data-si="${si}" data-rk="${esc(meta ? kr : 'o' + kr)}" data-src="${meta ? meta.src : kr}" data-root="${meta ? meta.root : kr}"${meta ? ` title="${esc((meta.name || '') + '님이 추가한 행')}"` : ''}>${rowEd ? '<button class="rb" data-act="add" title="이 행 아래에 같은 서식의 행 추가">＋</button>' : ''}${mine ? '<button class="rb dan" data-act="del" title="내가 추가한 행 삭제">×</button>' : ''}</td>`;
+        gh = `<td class="rh${meta ? ' nr' : ''}" data-si="${si}" data-rk="${esc(meta ? kr : 'o' + kr)}" data-src="${meta ? meta.src : kr}" data-root="${meta ? meta.root : kr}" data-mkt="xr_${si}_${kr}"${meta ? ` title="${esc((meta.name || '') + '님이 추가한 행')}"` : ''}>${rowEd ? '<button class="rb" data-act="add" title="이 행 아래에 같은 서식의 행 추가 (Shift+클릭: 여러 개)">＋</button>' : ''}<button class="rb mk" data-act="mark" title="삭제 표시 (다운로드할 때 삭제됩니다)">－</button>${mine ? '<button class="rb dan" data-act="del" title="내가 추가한 행 삭제">×</button>' : ''}</td>`;
       }
       h += trs + gh + rh + '</tr>';
     }
@@ -621,10 +712,174 @@ const hTextStyle = (H, p0) => {
 };
 const nestedIn = (el, stop) => { for (let p = el.parentNode; p && p !== stop; p = p.parentNode) if (p.nodeType === 1 && p.localName === 'tbl') return true; return false; };
 const closestTc = el => { for (let p = el.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'tc') return p; return null; };
-function hTable(tbl, ti, si, tbls, H, allowFilled) {
+/* ---------- 한글(hwpx) 행·열·본문 줄 추가 : XML(DOM)을 가상 순서대로 재구성 ---------- */
+const clampI = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+function hwpGrid(tbl) {
+  const trs = kids(tbl, 'tr'), cells = [];
+  trs.forEach(tr => kids(tr, 'tc').forEach(tc => {
+    const ad = kid(tc, 'cellAddr'), sp = kid(tc, 'cellSpan'), sz = kid(tc, 'cellSz');
+    cells.push({ tc, r: +(ad && ad.getAttribute('rowAddr') || 0), c: +(ad && ad.getAttribute('colAddr') || 0), rs: +(sp && sp.getAttribute('rowSpan') || 1), cs: +(sp && sp.getAttribute('colSpan') || 1), w: +(sz && sz.getAttribute('width') || 0), h: +(sz && sz.getAttribute('height') || 0) });
+  }));
+  return { trs, cells };
+}
+function applyHwpTable(doc, tbl, rowOps, colOps, delR, delC) {
+  const { trs, cells } = hwpGrid(tbl); if (!trs.length || !cells.length) return;
+  const nR = Math.max(trs.length, ...cells.map(x => x.r + x.rs)), nC = Math.max(...cells.map(x => x.c + x.cs));
+  const cover = Array.from({ length: nR }, () => new Array(nC).fill(null));
+  cells.forEach(O => { for (let i = O.r; i < O.r + O.rs && i < nR; i++) for (let j = O.c; j < O.c + O.cs && j < nC; j++) cover[i][j] = O; });
+  const ro = rowOrder(nR, rowOps), co = rowOrder(nC, colOps), DR = ro.order.length, DC = co.order.length;
+  const FR = r => ro.F[r + 1] - 1, FC = c => co.F[c + 1] - 1;
+  const srcR = i => { const d = ro.order[i]; return clampI((d.orig ? d.orig : d.src) - 1, 0, nR - 1); };
+  const srcC = j => { const d = co.order[j]; return clampI((d.orig ? d.orig : d.src) - 1, 0, nC - 1); };
+  const keyR = i => { const d = ro.order[i]; return d.orig ? d.orig - 1 : 'n' + d.id; };
+  const keyC = j => { const d = co.order[j]; return d.orig ? d.orig - 1 : 'n' + d.id; };
+  const occ = Array.from({ length: DR }, () => new Array(DC).fill(false)), specs = [];
+  const free = (r1, c1, r2, c2) => { for (let i = r1; i <= r2; i++) for (let j = c1; j <= c2; j++) if (occ[i] === undefined || occ[i][j] !== false) return false; return true; };
+  const place = (r1, c1, r2, c2, O, reuse) => { for (let i = r1; i <= r2; i++) for (let j = c1; j <= c2; j++) occ[i][j] = true; specs.push({ r1, c1, r2, c2, O, reuse }); };
+  cells.forEach(O => place(FR(O.r), FC(O.c), FR(O.r + O.rs - 1), FC(O.c + O.cs - 1), O, true));
+  ro.order.forEach((d, i) => {
+    if (d.orig) return; const sr = srcR(i), seen = new Set();
+    for (let j0 = 0; j0 < nC; j0++) { const Os = cover[sr][j0]; if (!Os || seen.has(Os)) continue; seen.add(Os); const c1 = FC(Os.c), c2 = FC(Os.c + Os.cs - 1); if (free(i, c1, i, c2)) place(i, c1, i, c2, Os, false); }
+  });
+  co.order.forEach((d, j) => {
+    if (d.orig) return; const sc = srcC(j), seen = new Set();
+    for (let i0 = 0; i0 < nR; i0++) { const Os = cover[i0][sc]; if (!Os || seen.has(Os)) continue; seen.add(Os); const r1 = FR(Os.r), r2 = FR(Os.r + Os.rs - 1); if (free(r1, j, r2, j)) place(r1, j, r2, j, Os, false); }
+  });
+  for (let i = 0; i < DR; i++) for (let j = 0; j < DC; j++) if (!occ[i][j]) place(i, j, i, j, cover[srcR(i)][srcC(j)] || cells[0], false);
+  /* 폭·높이 */
+  const origW = new Array(nC).fill(0), origH = new Array(nR).fill(0);
+  cells.forEach(O => { if (O.cs === 1 && O.w) origW[O.c] = Math.max(origW[O.c], O.w); if (O.rs === 1 && O.h) origH[O.r] = Math.max(origH[O.r], O.h); });
+  for (let c = 0; c < nC; c++) if (!origW[c]) { const cv = cells.filter(O => O.c <= c && c < O.c + O.cs && O.w); origW[c] = cv.length ? Math.round(cv.reduce((a, O) => a + O.w / O.cs, 0) / cv.length) : 5000; }
+  for (let r = 0; r < nR; r++) if (!origH[r]) { const cv = cells.filter(O => O.r <= r && r < O.r + O.rs && O.h); origH[r] = cv.length ? Math.round(cv.reduce((a, O) => a + O.h / O.rs, 0) / cv.length) : 2000; }
+  let colW = co.order.map((d, j) => origW[srcC(j)]); const rowH = ro.order.map((d, i) => origH[srcR(i)]);
+  /* 삭제 표시된 행·열 */
+  let keepR = ro.order.map((d, i) => !(delR && delR.has(String(keyR(i))))), keepC = co.order.map((d, j) => !(delC && delC.has(String(keyC(j)))));
+  if (!keepR.some(Boolean) || !keepC.some(Boolean)) { keepR = keepR.map(() => true); keepC = keepC.map(() => true); }
+  const nrIdx = [], ncIdx = []; let kr0 = 0, kc0 = 0;
+  keepR.forEach((k, i) => { nrIdx[i] = k ? kr0++ : -1; }); keepC.forEach((k, j) => { ncIdx[j] = k ? kc0++ : -1; });
+  if (DC !== nC || kc0 !== DC) { const t0 = origW.reduce((a, b) => a + b, 0); const t1 = colW.reduce((a, w, j) => a + (keepC[j] ? w : 0), 0), f = t1 ? t0 / t1 : 1; colW = colW.map(w => Math.round(w * f)); }
+  const sumK = (arr, keep, i, j) => { let x = 0; for (let k = i; k <= j; k++) if (keep[k]) x += arr[k] || 0; return x; };
+  /* 재구성 */
+  const after = trs[trs.length - 1].nextSibling;
+  trs.forEach(tr => { kids(tr, 'tc').forEach(tc => tr.removeChild(tc)); tbl.removeChild(tr); });
+  const mkClone = O => { const c = O.tc.cloneNode(true); all(c, 'tbl').forEach(t => t.parentNode && t.parentNode.removeChild(t)); setTcText(doc, c, ''); return c; };
+  const rowsOut = [];
+  for (let i = 0; i < DR; i++) {
+    const d = ro.order[i], base = d.orig ? trs[Math.min(trs.length - 1, d.orig - 1)] : trs[Math.min(trs.length - 1, srcR(i))];
+    rowsOut.push(d.orig ? base : base.cloneNode(false));
+  }
+  const trKeep = rowsOut.filter((_, i) => keepR[i]);
+  specs.sort((a, b) => a.c1 - b.c1);
+  specs.forEach(s2 => {
+    let r1 = s2.r1; while (r1 <= s2.r2 && !keepR[r1]) r1++; let c1 = s2.c1; while (c1 <= s2.c2 && !keepC[c1]) c1++;
+    if (r1 > s2.r2 || c1 > s2.c2) return;
+    let rs = 0, cs = 0; for (let i = s2.r1; i <= s2.r2; i++) if (keepR[i]) rs++; for (let j = s2.c1; j <= s2.c2; j++) if (keepC[j]) cs++;
+    const tc = s2.reuse ? s2.O.tc : mkClone(s2.O), ad = kid(tc, 'cellAddr'), sp = kid(tc, 'cellSpan'), sz = kid(tc, 'cellSz');
+    if (ad) { ad.setAttribute('rowAddr', nrIdx[r1]); ad.setAttribute('colAddr', ncIdx[c1]); }
+    if (sp) { sp.setAttribute('rowSpan', rs); sp.setAttribute('colSpan', cs); }
+    if (sz) { sz.setAttribute('width', sumK(colW, keepC, s2.c1, s2.c2)); sz.setAttribute('height', sumK(rowH, keepR, s2.r1, s2.r2)); }
+    tc._kr = keyR(s2.r1); tc._kc = keyC(s2.c1);
+    trKeep[nrIdx[r1]].appendChild(tc);
+  });
+  trKeep.forEach(tr => tbl.insertBefore(tr, after));
+  if (tbl.hasAttribute('rowCnt')) tbl.setAttribute('rowCnt', kr0);
+  if (tbl.hasAttribute('colCnt')) tbl.setAttribute('colCnt', kc0);
+  const tsz = kid(tbl, 'sz'); if (tsz && tsz.hasAttribute('height')) tsz.setAttribute('height', sumK(rowH, keepR, 0, DR - 1));
+  tbl._info = { ro, co, nR, nC };
+}
+function blankPara(doc, p) {
+  const np = p.cloneNode(false), NS = p.namespaceURI, pre = p.prefix ? p.prefix + ':' : '';
+  const r0 = kids(p, 'run').find(r => r.hasAttribute('charPrIDRef')) || all(p, 'run').find(r => r.hasAttribute('charPrIDRef'));
+  const run = doc.createElementNS(NS, pre + 'run'); run.setAttribute('charPrIDRef', r0 ? r0.getAttribute('charPrIDRef') : '0');
+  run.appendChild(doc.createElementNS(NS, pre + 't')); np.appendChild(run);
+  ['pageBreak', 'columnBreak'].forEach(a => { if (np.hasAttribute(a)) np.setAttribute(a, '0'); });
+  return np;
+}
+function applyHwpOps(doc, rows, si, marks) {
+  const root = doc.documentElement, tbls = all(root, 'tbl');
+  tbls.forEach(tbl => kids(tbl, 'tr').forEach(tr => kids(tr, 'tc').forEach(tc => { const ad = kid(tc, 'cellAddr'); tc._kr = +(ad && ad.getAttribute('rowAddr') || 0); tc._kc = +(ad && ad.getAttribute('colAddr') || 0); })));
+  const mine = (rows || []).filter(d => d.sec === si);
+  const mk = { r: {}, c: {}, p: new Set() };
+  (marks || []).forEach(k => {
+    let m = /^r_(\d+)_(\d+)_(.+)$/.exec(k); if (m && +m[1] === si) { (mk.r[m[2]] = mk.r[m[2]] || new Set()).add(m[3]); return; }
+    m = /^c_(\d+)_(\d+)_(.+)$/.exec(k); if (m && +m[1] === si) { (mk.c[m[2]] = mk.c[m[2]] || new Set()).add(m[3]); return; }
+    m = /^p_(\d+)_(.+)$/.exec(k); if (m && +m[1] === si) mk.p.add(m[2]);
+  });
+  tbls.forEach((tbl, ti) => {
+    const ro = mine.filter(d => d.type === 'hr' && d.t === ti), co = mine.filter(d => d.type === 'hc' && d.t === ti), dr = mk.r[ti], dc = mk.c[ti];
+    if (ro.length || co.length || dr || dc) applyHwpTable(doc, tbl, ro, co, dr, dc);
+  });
+  const ps = kids(root, 'p'); ps.forEach((p, i) => { p._pk = i; });
+  const pops = mine.filter(d => d.type === 'hp');
+  if (pops.length && ps.length) {
+    const po = rowOrder(ps.length, pops); let prev = null;
+    po.order.forEach(d => {
+      if (d.orig) { prev = ps[d.orig - 1]; return; }
+      const np = blankPara(doc, ps[clampI(d.src - 1, 0, ps.length - 1)]); np._pk = 'n' + d.id; np._meta = d;
+      root.insertBefore(np, prev ? prev.nextSibling : root.firstChild); prev = np;
+    });
+  }
+  if (mk.p.size) kids(root, 'p').forEach(p => { if (mk.p.has(String(p._pk))) root.removeChild(p); });
+  return tbls;
+}
+function fillP(doc, q, text) {
+  const NS = q.namespaceURI, pre = q.prefix ? q.prefix + ':' : '';
+  let run = kid(q, 'run');
+  if (!run) { run = doc.createElementNS(NS, pre + 'run'); run.setAttribute('charPrIDRef', '0'); q.insertBefore(run, q.firstChild); }
+  let ts = all(q, 't');
+  if (!ts.length) { const t = doc.createElementNS(NS, pre + 't'); run.appendChild(t); ts = [t]; }
+  ts.forEach((t, i) => { t.textContent = i ? '' : text; });
+  kids(q, 'linesegarray').forEach(x => q.removeChild(x));
+}
+/* 문단 안의 글자 모양(여러 run)을 유지한 채, 바뀐 부분만 반영 */
+function diffP(doc, q, text) {
+  const ts = all(q, 't'); if (!ts.length) { fillP(doc, q, text); return; }
+  const strs = ts.map(t => t.textContent), old = strs.join('');
+  if (old === text) return;
+  let a = 0; const mn = Math.min(old.length, text.length);
+  while (a < mn && old[a] === text[a]) a++;
+  let b = 0; while (b < mn - a && old[old.length - 1 - b] === text[text.length - 1 - b]) b++;
+  const delLen = old.length - a - b, ins = text.slice(a, text.length - b);
+  let pos = 0, target = -1;
+  strs.forEach((st, i) => { const s0 = pos, e0 = pos + st.length; if (target < 0 && (delLen > 0 ? (s0 <= a && a < e0) : (a === 0 ? true : (s0 < a && a <= e0)))) target = i; pos = e0; });
+  if (target < 0) target = strs.length - 1;
+  pos = 0;
+  strs.forEach((st, i) => {
+    const s0 = pos, len = st.length; pos += len;
+    const left = st.slice(0, clampI(a - s0, 0, len)), right = st.slice(clampI(a + delLen - s0, 0, len));
+    const next = left + (i === target ? ins : '') + right;
+    if (next !== st) ts[i].textContent = next;
+  });
+  kids(q, 'linesegarray').forEach(x => q.removeChild(x));
+}
+function setPText(doc, p, val) {
+  val = String(val).replace(/\r/g, '');
+  if (val === '' && !all(p, 't').some(t => t.textContent)) return;
+  const lines = val.split('\n'); diffP(doc, p, lines[0]);
+  let prev = p; for (const ln of lines.slice(1)) { const np = blankPara(doc, p); fillP(doc, np, ln); p.parentNode.insertBefore(np, prev.nextSibling); prev = np; }
+}
+
+function hTable(tbl, ti, si, tbls, H, allowFilled, G) {
+  const info = tbl._info, trs = kids(tbl, 'tr'), gut = !!(G && G.on);
+  let DC = 0; const cw = [];
+  trs.forEach(tr => kids(tr, 'tc').forEach(tc => { const ad = kid(tc, 'cellAddr'), sp = kid(tc, 'cellSpan'), sz = kid(tc, 'cellSz'); const c = +(ad && ad.getAttribute('colAddr') || 0), cs = +(sp && sp.getAttribute('colSpan') || 1); DC = Math.max(DC, c + cs); if (cs === 1 && sz && !cw[c]) cw[c] = Math.round(+sz.getAttribute('width') / 75); }));
+  const desc = (o, k) => {
+    if (info) { const d = o.order[k]; if (d && !d.orig) return { rk: d.id, src: d.src, root: d.root, meta: d, key: 'n' + d.id }; const n = d ? d.orig : k + 1; return { rk: 'o' + n, src: n, root: n, key: n - 1 }; }
+    return { rk: 'o' + (k + 1), src: k + 1, root: k + 1, key: k };
+  };
+  const attrs = (type, d) => `data-type="${type}" data-sec="${si}" data-t="${ti}" data-rk="${esc(d.rk)}" data-src="${d.src}" data-root="${d.root}"`;
+  const btns = (d, what) => `<button class="rb" data-act="add" title="이 ${what} 다음에 ${what} 추가 (Shift+클릭: 여러 개)">＋</button>` + '<button class="rb mk" data-act="mark" title="삭제 표시 (다운로드할 때 삭제됩니다)">－</button>' + (d.meta && G.uid && d.meta.by === G.uid ? `<button class="rb dan" data-act="del" title="내가 추가한 ${what} 삭제">×</button>` : '');
   let h = '<table class="ht">';
-  for (const tr of kids(tbl, 'tr')) {
-    h += '<tr>';
+  if (gut) {
+    h += '<tr class="chd"><td class="rh"></td>';
+    for (let j = 0; j < DC; j++) { const d = desc(info && info.co, j); h += `<td class="ch${d.meta ? ' nr' : ''}" ${attrs('hc', d)} data-mkt="c_${si}_${ti}_${d.key}" style="width:${cw[j] || 40}px"${d.meta ? ` title="${esc((d.meta.name || '') + '님이 추가한 열')}"` : ''}>${btns(d, '열')}</td>`; }
+    h += '</tr>';
+  }
+  const ckeys = []; for (let j = 0; j < DC; j++) ckeys[j] = desc(info && info.co, j).key;
+  trs.forEach((tr, ri) => {
+    const dr = desc(info && info.ro, ri);
+    h += `<tr data-mk="r_${si}_${ti}_${dr.key}">`;
+    if (gut) { const d = dr; h += `<td class="rh${d.meta ? ' nr' : ''}" ${attrs('hr', d)} data-mkt="r_${si}_${ti}_${d.key}"${d.meta ? ` title="${esc((d.meta.name || '') + '님이 추가한 행')}"` : ''}>${btns(d, '행')}</td>`; }
     for (const tc of kids(tr, 'tc')) {
       const ad = kid(tc, 'cellAddr'), sp = kid(tc, 'cellSpan'), sz = kid(tc, 'cellSz'), sub = kid(tc, 'subList'), mg = kid(tc, 'cellMargin');
       const r = +(ad && ad.getAttribute('rowAddr') || 0), c = +(ad && ad.getAttribute('colAddr') || 0);
@@ -639,34 +894,68 @@ function hTable(tbl, ti, si, tbls, H, allowFilled) {
       if (bf) { if (bf.bg) st += `background:${bf.bg};`; for (const sd of ['left', 'right', 'top', 'bottom']) st += bf[sd] ? `border-${sd}:${bf[sd].w}px ${bf[sd].dbl ? 'double' : 'solid'} ${bf[sd].c};` : `border-${sd}:1px solid transparent;`; }
       if (mg) { const m = k => Math.round(+(mg.getAttribute(k) || 0) / 75); st += `padding:${m('top')}px ${m('right')}px ${m('bottom')}px ${m('left')}px;`; }
       const va = sub && sub.getAttribute('vertAlign'); st += `vertical-align:${va === 'TOP' ? 'top' : va === 'BOTTOM' ? 'bottom' : 'middle'};` + hTextStyle(H, p0);
+      const kr = tc._kr !== undefined ? tc._kr : r, kc = tc._kc !== undefined ? tc._kc : c, ck = cs === 1 && ckeys[c] !== undefined ? ` data-ck="c_${si}_${ti}_${ckeys[c]}"` : '';
       if (nestedTbls.length) {
-        h += `<td class="lk" colspan="${cs}" rowspan="${rs}" style="${st}">${text.trim() ? `<div>${esc(text)}</div>` : ''}${nestedTbls.map(t => hTable(t, tbls.indexOf(t), si, tbls, H, allowFilled)).join('')}</td>`;
+        h += `<td class="lk" colspan="${cs}" rowspan="${rs}"${ck} style="${st}">${text.trim() ? `<div>${esc(text)}</div>` : ''}${nestedTbls.map(t => hTable(t, tbls.indexOf(t), si, tbls, H, allowFilled, G)).join('')}</td>`;
       } else if (!text.trim() || allowFilled) {
-        const loc = { kind: 'h', sec: si, t: ti, r, c };
-        h += `<td class="ed" colspan="${cs}" rowspan="${rs}" style="${st}" data-k="h_${si}_${ti}_${r}_${c}" data-loc="${esc(JSON.stringify(loc))}" data-label="표${ti + 1} ${r + 1}행 ${c + 1}열">${esc(text)}</td>`;
-      } else h += `<td class="lk" colspan="${cs}" rowspan="${rs}" style="${st}">${esc(text)}</td>`;
+        const loc = { kind: 'h', sec: si, t: ti, r: kr, c: kc, pr: r, pc: c };
+        h += `<td class="ed" colspan="${cs}" rowspan="${rs}"${ck} style="${st}" data-k="h_${si}_${ti}_${kr}_${kc}" data-loc="${esc(JSON.stringify(loc))}" data-label="표${ti + 1} ${r + 1}행 ${c + 1}열">${esc(text)}</td>`;
+      } else h += `<td class="lk" colspan="${cs}" rowspan="${rs}"${ck} style="${st}">${esc(text)}</td>`;
     }
     h += '</tr>';
-  }
+  });
   return h + '</table>';
 }
-async function renderHwpx(bytes, sheet) {
+const HWP_OBJ = ['pic', 'container', 'rect', 'ellipse', 'line', 'arc', 'polygon', 'curve', 'ole', 'equation', 'chart', 'textart', 'video', 'connectLine'];
+async function renderHwpx(bytes, sheet, ro) {
   const zip = await JSZip.loadAsync(bytes), H = await hwpHeader(zip), allowFilled = !!(sheet && sheet.allowFilled);
+  const G = { on: !!(ro && ro.gutter), uid: ro && ro.uid }, rows = (ro && ro.rows) || [];
   const names = Object.keys(zip.files).filter(n => /^Contents\/section\d+\.xml$/i.test(n)).sort((a, b) => parseInt(a.match(/\d+/)[0]) - parseInt(b.match(/\d+/)[0]));
   if (!names.length) throw new Error('hwpx 형식이 아닙니다.');
   let html = '';
   for (let si = 0; si < names.length; si++) {
     const doc = new DOMParser().parseFromString(await zip.file(names[si]).async('string'), 'application/xml');
-    const tbls = all(doc.documentElement, 'tbl');
-    for (const p of kids(doc.documentElement, 'p')) {
+    const tbls = applyHwpOps(doc, rows, si);
+    let buf = '';
+    const flush = () => { if (buf) { html += `<table class="pt">${buf}</table>`; buf = ''; } };
+    const pd = p => {
+      const added = typeof p._pk === 'string', m = p._meta;
+      return { rk: added ? m.id : 'o' + (p._pk + 1), src: added ? m.src : p._pk + 1, root: added ? m.root : p._pk + 1, meta: added ? m : null };
+    };
+    const gcell = (p, noMark) => {
+      if (!G.on) return ''; const d = pd(p);
+      return `<td class="rh${d.meta ? ' nr' : ''}" data-type="hp" data-sec="${si}" data-rk="${esc(d.rk)}" data-src="${d.src}" data-root="${d.root}"${noMark ? '' : ` data-mkt="p_${si}_${p._pk}"`}${d.meta ? ` title="${esc((d.meta.name || '') + '님이 추가한 줄')}"` : ''}><button class="rb" data-act="add" title="이 줄 아래에 줄 추가 (Shift+클릭: 여러 개)">＋</button>${noMark ? '' : '<button class="rb mk" data-act="mark" title="삭제 표시 (다운로드할 때 삭제됩니다)">－</button>'}${d.meta && G.uid && d.meta.by === G.uid ? '<button class="rb dan" data-act="del" title="내가 추가한 줄 삭제">×</button>' : ''}</td>`;
+    };
+    const US = sheet && sheet.units > 1 && sheet.unitSize > 0 ? sheet.unitSize : 0; let lastU = -1;
+    kids(doc.documentElement, 'p').forEach((p, idx) => {
+      let ua = '';
+      if (US) {
+        const rp = typeof p._pk === 'string' ? (p._meta.root - 1) : p._pk, u = Math.min(sheet.units - 1, Math.floor(rp / US));
+        if (u !== lastU) { flush(); html += `<div class="ubar" data-ub="${u}" data-uname="${esc((sheet.unitNames || [])[u] || (u + 1) + '쪽')}"></div>`; lastU = u; }
+        ua = ` data-u="${u}"`;
+      }
+      const tops = all(p, 'tbl').filter(t => !within(t, 'tc'));
       const txt = all(p, 't').filter(t => !within(t, 'tbl')).map(t => t.textContent).join('');
-      if (txt.trim()) html += `<div class="hp" style="${hTextStyle(H, p)}">${esc(txt)}</div>`;
-      all(p, 'tbl').filter(t => !within(t, 'tc')).forEach(t => { html += hTable(t, tbls.indexOf(t), si, tbls, H, allowFilled); });
-    }
+      const hasObj = HWP_OBJ.some(n => all(p, n).length);
+      const sty = hTextStyle(H, p);
+      if (tops.length) {
+        if (txt.trim()) buf += `<tr data-mk="p_${si}_${p._pk}"${ua}>${G.on ? '<td class="rh"></td>' : ''}<td class="lk" style="${sty}">${esc(txt)}</td></tr>`;
+        flush();
+        html += `<div class="tw" data-mk="p_${si}_${p._pk}"${ua}>${G.on ? `<div class="twh" data-mkt="p_${si}_${p._pk}">${'<button class="rb mk" data-act="mark" title="삭제 표시 (다운로드할 때 삭제됩니다)">－</button>'} <span class="muted">이 표 삭제 표시</span></div>` : ''}` + tops.map(t => hTable(t, tbls.indexOf(t), si, tbls, H, allowFilled, G)).join('') + '</div>';
+        if (G.on) buf += `<tr class="padd"${ua}>${gcell(p, true)}<td class="lk" style="height:8px;font-size:10px;color:#9aa4af">↑ 표 아래에 본문 줄 추가</td></tr>`;
+        return;
+      }
+      const eligible = !hasObj && (!txt.trim() || allowFilled);
+      if (eligible) {
+        const loc = { kind: 'g', sec: si, k: p._pk, pr: idx, pc: 0 };
+        buf += `<tr data-mk="p_${si}_${p._pk}"${ua}>${gcell(p)}<td class="ed" style="${sty}" data-k="g_${si}_${p._pk}" data-loc="${esc(JSON.stringify(loc))}" data-label="본문 ${idx + 1}번째 줄">${esc(txt)}</td></tr>`;
+      } else if (txt.trim()) buf += `<tr data-mk="p_${si}_${p._pk}"${ua}>${gcell(p)}<td class="lk" style="${sty}">${esc(txt)}</td></tr>`;
+    });
+    flush();
   }
   return { panes: [{ name: '문서', html }] };
 }
-const renderFile = (sheet, bytes, ro) => sheet.type === 'xlsx' ? renderXlsx(bytes, sheet, ro) : renderHwpx(bytes, sheet);
+const renderFile = (sheet, bytes, ro) => sheet.type === 'xlsx' ? renderXlsx(bytes, sheet, ro) : renderHwpx(bytes, sheet, ro);
 
 /* ---------- 화면에 붙이기 (입력/조회 공용) ---------- */
 const cellV = td => String(td.innerText !== undefined ? td.innerText : td.textContent).replace(/\u00a0/g, ' ').replace(/\r/g, '').trim();
@@ -698,7 +987,7 @@ function mountView(box, r, opt) {
     const sel = td.querySelector('select');
     if (sel) sel.disabled = !opt.editable;
     else if (opt.editable) { try { td.contentEditable = 'plaintext-only'; if (td.contentEditable !== 'plaintext-only') td.contentEditable = 'true'; } catch (e) { td.contentEditable = 'true'; } td.spellcheck = false; }
-    try { const L = JSON.parse(td.dataset.loc); if (L.kind === 'x') { const p = L.pr ? [L.pr, L.pc] : a1ToRC(L.addr); td._p = { g: 'x' + L.si, r: p[0], c: p[1] }; } else td._p = { g: 'h' + L.sec + '_' + L.t, r: L.r, c: L.c }; } catch (e) { }
+    try { const L = JSON.parse(td.dataset.loc); if (L.kind === 'x') { const p = L.pr ? [L.pr, L.pc] : a1ToRC(L.addr); td._p = { g: 'x' + L.si, r: p[0], c: p[1] }; } else if (L.kind === 'g') td._p = { g: 'g' + L.sec, r: L.pr, c: 0 }; else td._p = { g: 'h' + L.sec + '_' + L.t, r: L.pr !== undefined ? L.pr : L.r, c: L.pc !== undefined ? L.pc : L.c }; } catch (e) { }
   });
   const byPos = new Map(); tds.forEach(td => { if (td._p) byPos.set(td._p.g + '|' + td._p.r + '|' + td._p.c, td); });
   const view = { cells: {}, filter: null, count: tds.length };
@@ -792,6 +1081,11 @@ function mountView(box, r, opt) {
         const t = byPos.get(p.g + '|' + (p.r + i) + '|' + (p.c + j));
         if (t) { let v = String(val).replace(/\r/g, '').trim(); list.push({ td: t, v }); } else skipped++;
       }));
+      if (skipped && opt.onExpand) {
+        let maxR = -1; for (const t of tds) if (t._p && t._p.g === p.g && t._p.r > maxR) maxR = t._p.r;
+        const need = p.r + grid.length - 1 - maxR;
+        if (need > 0 && await opt.onExpand(td, grid, need)) return;
+      }
       if (opt.onBulk) await opt.onBulk(list, skipped, '붙여넣기');
     };
     const fillTargets = (src, t) => {
@@ -863,6 +1157,8 @@ function mountView(box, r, opt) {
       if (e.key === 'Enter') {
         e.preventDefault();
         if (e.altKey) { if (!document.execCommand('insertLineBreak')) document.execCommand('insertText', false, '\n'); return; }
+        if ((e.ctrlKey || e.metaKey) && opt.onAppend) { td.blur(); opt.onAppend(td); return; }
+        if (!e.shiftKey && opt.onAppend && !neighbor(td, 'down') && !(td.closest('tr') && td.closest('tr').nextElementSibling)) { td.blur(); opt.onAppend(td); return; }
         const eds = [...(td.closest('.pane') || box).querySelectorAll('td.ed')];
         const nx = neighbor(td, e.shiftKey ? 'up' : 'down') || eds[eds.indexOf(td) + (e.shiftKey ? -1 : 1)];
         if (nx) goTo(td, nx); else td.blur();
@@ -875,6 +1171,7 @@ function mountView(box, r, opt) {
       const td = e.target.closest && e.target.closest('td.ed'); if (!td || e.target.tagName === 'SELECT') return;
       e.preventDefault();
       const grid = parseTSV(e.clipboardData.getData('text/plain') || '');
+      if (/^g_/.test(td.dataset.k || '') && grid.every(r => r.length <= 1)) { document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').replace(/\r/g, '').replace(/\n+$/, '')); return; }
       if (grid.length <= 1 && (grid[0] || []).length <= 1) {
         let t = (grid[0] && grid[0][0]) || '';
         document.execCommand('insertText', false, t); return;
@@ -886,7 +1183,7 @@ function mountView(box, r, opt) {
 }
 
 /* ---------- 취합 결과를 원본 서식에 반영해 파일 만들기 ---------- */
-async function buildXlsx(bytes, cells, rows) {
+async function buildXlsx(bytes, cells, rows, marks) {
   const wb = new ExcelJS.Workbook(); await wb.xlsx.load(bytes);
   const ops = applyRowOps(wb, rows || []);
   for (const rec of cells) {
@@ -896,6 +1193,7 @@ async function buildXlsx(bytes, cells, rows) {
     const t = String(rec.v).trim(), num = toNum(t);
     ws.getCell(addr).value = t === '' ? null : (num !== null ? num : rec.v);
   }
+  deleteMarkedRows(wb, ops, marks);
   wb.calcProperties = Object.assign(wb.calcProperties || {}, { fullCalcOnLoad: true });
   const buf = await wb.xlsx.writeBuffer();
   return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -914,25 +1212,28 @@ function setTcText(doc, tc, val) {
     kids(q, 'linesegarray').forEach(x => q.removeChild(x));
   };
   const lines = val.split('\n');
+  if (lines.length === ps.length && all(tc, 'tbl').length === 0) { ps.forEach((q, i) => diffP(doc, q, lines[i])); return; }
   ps.slice(1).forEach(q => sub.removeChild(q));
   const tmpl = p.cloneNode(true);
   fill(p, lines[0]);
   let prev = p;
   for (const ln of lines.slice(1)) { const np = tmpl.cloneNode(true); fill(np, ln); sub.insertBefore(np, prev.nextSibling); prev = np; }
 }
-async function buildHwpx(bytes, cells, opts) {
-  const zip = await JSZip.loadAsync(bytes);
+async function buildHwpx(bytes, cells, opts, rows, marks) {
+  const zip = await JSZip.loadAsync(bytes), allowFilled = !!(opts && opts.allowFilled);
   const names = Object.keys(zip.files).filter(n => /^Contents\/section\d+\.xml$/i.test(n)).sort((a, b) => parseInt(a.match(/\d+/)[0]) - parseInt(b.match(/\d+/)[0]));
   for (let si = 0; si < names.length; si++) {
-    const mine = cells.filter(r => r.kind === 'h' && r.sec === si && (String(r.v).trim() !== '' || (opts && opts.allowFilled)));
-    if (!mine.length) continue;
+    const mine = cells.filter(r => (r.kind === 'h' || r.kind === 'g') && r.sec === si && (String(r.v).trim() !== '' || allowFilled));
+    if (!mine.length && !(rows || []).some(d => d.sec === si) && !(marks || []).some(k => new RegExp('^[rcp]_' + si + '_').test(k))) continue;
     const xml = await zip.file(names[si]).async('string');
     const doc = new DOMParser().parseFromString(xml, 'application/xml');
-    const tbls = all(doc.documentElement, 'tbl');
+    const tbls = applyHwpOps(doc, rows, si, marks);
+    const tcMap = new Map(), pMap = new Map();
+    tbls.forEach((tbl, ti) => kids(tbl, 'tr').forEach(tr => kids(tr, 'tc').forEach(tc => tcMap.set(ti + '|' + tc._kr + '|' + tc._kc, tc))));
+    kids(doc.documentElement, 'p').forEach(p => pMap.set(String(p._pk), p));
     for (const rec of mine) {
-      const tbl = tbls[rec.t]; if (!tbl) continue;
-      const tc = all(tbl, 'tc').find(x => { const a = kid(x, 'cellAddr'); return a && +a.getAttribute('rowAddr') === rec.r && +a.getAttribute('colAddr') === rec.c; });
-      if (tc) setTcText(doc, tc, String(rec.v));
+      if (rec.kind === 'h') { const tc = tcMap.get(rec.t + '|' + rec.r + '|' + rec.c); if (tc) setTcText(doc, tc, String(rec.v)); }
+      else { const p = pMap.get(String(rec.k)); if (p) setPText(doc, p, String(rec.v)); }
     }
     let out = new XMLSerializer().serializeToString(doc);
     if (!out.startsWith('<?xml')) out = '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>' + out;
@@ -940,6 +1241,58 @@ async function buildHwpx(bytes, cells, opts) {
   }
   if (zip.file('mimetype')) zip.file('mimetype', await zip.file('mimetype').async('string'), { compression: 'STORE' });
   return zip.generateAsync({ type: 'blob', compression: 'DEFLATE', mimeType: 'application/hwp+zip' });
+}
+
+/* ---------- 쪽 자동 복사 (서식 1장 → N장) ---------- */
+const cloneDeep = v => {
+  if (v instanceof Date) return new Date(v.getTime());
+  if (Array.isArray(v)) return v.map(cloneDeep);
+  if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v)) o[k] = cloneDeep(v[k]); return o; }
+  return v;
+};
+const safeSheetName = (s, used) => {
+  let b = String(s || '').replace(/[\\\/\?\*\[\]:]/g, ' ').replace(/^'+|'+$/g, '').trim().slice(0, 28) || '쪽', n = b, i = 2;
+  while (used.has(n.toLowerCase())) n = b + ' ' + (i++);
+  used.add(n.toLowerCase()); return n;
+};
+async function replicateXlsx(bytes, n, names) {
+  const wb = new ExcelJS.Workbook(); await wb.xlsx.load(bytes);
+  if (wb.worksheets.length !== 1) throw new Error('시트가 1개인 파일만 복사할 수 있습니다. (현재 ' + wb.worksheets.length + '개)');
+  const ws = wb.worksheets[0], used = new Set();
+  const base = cloneDeep(ws.model);
+  ws.name = safeSheetName(names[0] || ws.name, used);
+  for (let i = 1; i < n; i++) {
+    const w2 = wb.addWorksheet(safeSheetName(names[i] || (names[0] ? names[0] + ' ' + (i + 1) : ws.name + ' (' + (i + 1) + ')'), used));
+    const m = cloneDeep(base); m.id = w2.id; m.name = w2.name; w2.model = m;
+    if (!(w2.model.merges || []).length) (base.merges || []).forEach(g => { try { w2.mergeCells(g); } catch (e) { } });
+  }
+  return new Uint8Array(await wb.xlsx.writeBuffer());
+}
+async function replicateHwpx(bytes, n) {
+  const zip = await JSZip.loadAsync(bytes);
+  const secs = Object.keys(zip.files).filter(f => /^Contents\/section\d+\.xml$/i.test(f));
+  if (secs.length !== 1) throw new Error('구역(section)이 1개인 문서만 복사할 수 있습니다.');
+  const doc = new DOMParser().parseFromString(await zip.file(secs[0]).async('string'), 'application/xml'), root = doc.documentElement;
+  const ps = kids(root, 'p'); if (!ps.length) throw new Error('본문 문단을 찾지 못했습니다.');
+  let maxId = 0; [...root.getElementsByTagNameNS('*', '*')].forEach(e => { ['id', 'instid'].forEach(a => { const v = parseInt(e.getAttribute(a), 10); if (v > maxId) maxId = v; }); });
+  const strip = el => { all(el, 'linesegarray').forEach(x => x.parentNode.removeChild(x)); };
+  const last = ps[ps.length - 1], tail = last.nextSibling;
+  for (let c = 1; c < n; c++) {
+    ps.forEach((p, i) => {
+      const q = p.cloneNode(true);
+      if (i === 0) {
+        all(q, 'secPr').forEach(x => { const par = x.parentNode; par.removeChild(x); });
+        all(q, 'ctrl').filter(x => [...x.children].some(k => ['colPr', 'header', 'footer', 'pageNum', 'pageHiding', 'newNum'].includes(k.localName))).forEach(x => x.parentNode.removeChild(x));
+        q.setAttribute('pageBreak', '1');
+      }
+      strip(q);
+      [q, ...all(q, '*')].forEach(e => { ['id', 'instid'].forEach(a => { if (e.hasAttribute(a)) e.setAttribute(a, String(++maxId)); }); });
+      root.insertBefore(q, tail);
+    });
+  }
+  strip(root);
+  zip.file(secs[0], new XMLSerializer().serializeToString(doc));
+  return { bytes: new Uint8Array(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', mimeType: 'application/hwp+zip' })), unitSize: ps.length };
 }
 
 /* =====================================================
@@ -955,6 +1308,45 @@ auth.onAuthStateChanged(u => {
     if (!started) { started = true; participantMain(u); }
   } else adminMain(u);
 });
+/* 삭제 표시 공용 */
+function applyMarks(root, marks) {
+  root.querySelectorAll('.delm').forEach(e => e.classList.remove('delm'));
+  Object.keys(marks).forEach(t => root.querySelectorAll(`[data-mk="${t}"], td[data-ck="${t}"]`).forEach(e => e.classList.add('delm')));
+  root.querySelectorAll('[data-mkt]').forEach(g => {
+    const b = g.querySelector('button[data-act=mark]'); if (!b) return; const on = !!marks[g.dataset.mkt];
+    b.textContent = on ? '↺' : '－'; b.title = on ? '삭제 표시 취소(복원)' : '삭제 표시 (다운로드할 때 삭제됩니다. Shift+클릭: 앞서 누른 항목부터 여기까지 한꺼번에)';
+  });
+}
+const markGroup = t => { const m = /^(p_\d+)_/.exec(t) || /^(r_\d+_\d+)_/.exec(t) || /^(xr_\d+)_/.exec(t) || /^(c_\d+_\d+)_/.exec(t); return m ? m[1] : t; };
+function markTargetsInGroup(root, group) {
+  const col = group.startsWith('c_'), out = [];
+  root.querySelectorAll(col ? `[data-mkt^="${group}_"]` : `[data-mk^="${group}_"]`).forEach(e => { const t = col ? e.dataset.mkt : e.dataset.mk; if (t && !out.includes(t)) out.push(t); });
+  return out;
+}
+/* 쪽(단위) 선택 공용 */
+const unitOf = td => { const e = td.closest('[data-u]'); if (e) return +e.dataset.u; const p = td.closest('.pane'); return p ? +p.dataset.pane : 0; };
+const unitName = (sheet, u) => (sheet.unitNames || [])[u] || (u + 1) + '쪽';
+function applyUnits(root, sheet, claims, uid, lockOn) {
+  if (!(sheet.units > 1)) return;
+  const who = c => c ? `${c.name || ''}${c.dept ? ' (' + c.dept + ')' : ''}` : '';
+  root.querySelectorAll('.ubar').forEach(b => {
+    const u = +b.dataset.ub, c = claims[u], mine = c && c.uid === uid;
+    b.className = 'ubar' + (mine ? ' mine' : c ? ' taken' : ''); b.textContent = b.dataset.uname + ' — ' + (c ? (mine ? '내 쪽' : who(c) + ' 담당') : '담당자 없음');
+  });
+  root.querySelectorAll('[data-tab]').forEach(b => {
+    if (b.dataset.t0 === undefined) b.dataset.t0 = b.textContent; const u = +b.dataset.tab, c = claims[u];
+    b.textContent = b.dataset.t0 + (c ? ' · ' + (c.name || '') : '');
+  });
+  if (!lockOn) return;
+  root.querySelectorAll('td.ed').forEach(td => {
+    const c = claims[unitOf(td)], lock = !(c && c.uid === uid), sel = td.querySelector('select');
+    if (sel) sel.disabled = lock;
+    else if (lock) td.contentEditable = 'false';
+    else if (td.contentEditable === 'false') { try { td.contentEditable = 'plaintext-only'; if (td.contentEditable !== 'plaintext-only') td.contentEditable = 'true'; } catch (e) { td.contentEditable = 'true'; } }
+    td.classList.toggle('ulock', lock);
+  });
+  root.querySelectorAll('td.rh, td.ch, div.twh').forEach(g => { const c = claims[unitOf(g)]; g.classList.toggle('ulock', !(c && c.uid === uid)); });
+}
 function msgPage(title, body) { clearSubs(); app.innerHTML = `<div class="card center"><h2>${title}</h2><p>${body}</p></div>`; }
 
 /* =====================================================
@@ -995,8 +1387,8 @@ async function participantMain(u) {
   if (!me || !me.name) me = await askMe();
   const touchPerson = () => ref.collection('people').doc(u.uid).set({ name: me.name, dept: me.dept, lastAt: TS() }, { merge: true }).catch(() => { });
   touchPerson();
-  app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="undo" title="실행 취소 (Ctrl+Z)">↶ 실행 취소</button><button id="redo" title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button><button id="mb">내 입력 목록</button><button id="chg">입력자 변경</button></div>
-    <div class="wrap"><div class="card"><div class="muted">점선 칸을 눌러 본인 항목을 입력하세요. 칸을 벗어나면(또는 Enter) 바로 저장됩니다. 다른 사람이 입력한 칸은 색으로 표시되고, 마우스를 올리면 입력자가 보입니다. (칸 안 줄바꿈: Alt+Enter)${sheet.type === 'xlsx' && sheet.allowAddRows ? ' 행 왼쪽의 ＋ 버튼을 누르면 그 아래에 같은 서식의 행이 추가됩니다.' : ''}</div></div>
+  app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="undo" title="실행 취소 (Ctrl+Z)">↶ 실행 취소</button><button id="redo" title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button>${sheet.units > 1 ? '<button id="um" class="pri">쪽 선택</button>' : ''}<button id="mb">내 입력 목록</button><button id="chg">입력자 변경</button></div>
+    <div class="wrap"><div class="card"><div class="muted">점선 칸을 눌러 본인 항목을 입력하세요. 칸을 벗어나면(또는 Enter) 바로 저장됩니다. 다른 사람이 입력한 칸은 색으로 표시되고, 마우스를 올리면 입력자가 보입니다. (칸 안 줄바꿈: Alt+Enter)${sheet.allowAddRows ? (sheet.type === 'xlsx' ? ' 행 왼쪽의 ＋ 버튼을 누르면 그 아래에 같은 서식의 행이 추가됩니다.' : ' 표는 왼쪽 ＋로 행을, 위쪽 ＋로 열을 추가하고, 본문은 줄 왼쪽의 ＋로 줄을 추가할 수 있습니다.') : ''}</div></div>
     <div class="card" id="mine" style="display:none"></div>
     <div id="vbox" class="card">서식을 불러오는 중…</div></div>`;
   const showWho = () => $('#who').textContent = `입력자: ${me.name}${me.dept ? ' (' + me.dept + ')' : ''}`; showWho();
@@ -1042,7 +1434,7 @@ async function participantMain(u) {
     });
   };
   $('#mb').onclick = () => { panelOpen = !panelOpen; $('#mine').style.display = panelOpen ? '' : 'none'; renderMine(); };
-  let allRows = [], allCells = {}, rowSig = null, rowsReady = false, dirty = false, building = false, pendingFocus = null;
+  let allRows = [], allCells = {}, rowSig = null, rowsReady = false, dirty = false, building = false, pendingFocus = null, pendingPaste = null, marks = {}, lastMark = null, hideDel = false, claims = {};
   let presMine = null, presT = null, presBeat = null, presDocs = {};
   const presRef = ref.collection('presence').doc(u.uid);
   const presSet = k => presRef.set({ k, name: me.name, dept: me.dept, ms: Date.now(), at: TS() }).catch(() => { });
@@ -1072,6 +1464,7 @@ async function participantMain(u) {
         toast(`${n}칸에 ${what}했습니다${skipped ? ` (입력할 수 없는 ${skipped}칸 제외)` : ''}`);
       },
       onSave: saveFn = async (td, v, opts = {}) => {
+        if (td.classList.contains('ulock')) { if (!opts.quiet) toast('내 쪽이 아닙니다. 위의 [쪽 선택]에서 담당 쪽을 먼저 선택해 주세요.'); return false; }
         if (isClosed(sheet)) { toast('마감되어 저장할 수 없습니다.'); return false; }
         const k = td.dataset.k, ex = view.cells[k];
         const { pr, pc, ...loc } = JSON.parse(td.dataset.loc);
@@ -1107,7 +1500,7 @@ async function participantMain(u) {
   try {
     const bytes = await loadBytes(sid);
     const vbox = $('#vbox');
-    const gutterOn = () => sheet.type === 'xlsx' && !!sheet.allowAddRows && !isClosed(sheet);
+    const gutterOn = () => !!sheet.allowAddRows && !isClosed(sheet);
     const build = async () => {
       if (building) { dirty = true; return; }
       building = true; dirty = false;
@@ -1121,42 +1514,115 @@ async function participantMain(u) {
         if (view.count) { note.className = 'muted'; note.style.marginBottom = '6px'; note.textContent = `입력할 수 있는 칸: ${view.count}개 (점선으로 표시된 칸)`; }
         else { note.className = 'warn'; note.innerHTML = '<b>입력할 수 있는 빈 칸을 찾지 못했습니다.</b><br>서식의 입력 칸에 공백·기호 등이 이미 들어 있으면 빈 칸으로 인식되지 않습니다. 파일 등록자에게 "이미 내용이 있는 칸도 수정 가능" 옵션으로 다시 등록해 달라고 요청해 주세요.'; }
         for (const k in allCells) view.update(k, allCells[k]);
+        { const hl = document.createElement('label'); hl.style.cssText = 'display:block;margin-top:4px;font-size:12px;color:#6b7280'; const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = hideDel; cb.onchange = () => { hideDel = cb.checked; vbox.classList.toggle('hidedel', hideDel); }; hl.appendChild(cb); hl.appendChild(document.createTextNode(' 삭제 표시된 항목 숨기기')); note.appendChild(hl); vbox.classList.toggle('hidedel', hideDel); }
         const tb = host.querySelectorAll('[data-tab]')[tabI]; if (tb && tabI) tb.click();
         host.querySelectorAll('.pane').forEach((p, i) => { if (sc[i]) { p.scrollLeft = sc[i][0]; p.scrollTop = sc[i][1]; } });
         if (pendingFocus) {
-          const t = [...host.querySelectorAll('td.ed')].find(x => (x.dataset.k || '').includes('@' + pendingFocus));
+          const pid = pendingFocus.id, cand = [...host.querySelectorAll('td.ed')].filter(x => { const k = x.dataset.k || ''; return k.includes('@' + pid) || k.split('_').includes('n' + pid); });
+          const t = cand.length ? ((pendingFocus.col !== undefined && cand.find(x => x._p && x._p.c === pendingFocus.col)) || cand[0]) : null;
           if (t) { pendingFocus = null; const sl = t.querySelector('select'); (sl || t).focus(); try { t.scrollIntoView({ block: 'nearest' }); } catch (er) { } }
         }
-        renderMine(); applyPresence();
+        applyMarks(vbox, marks); applyUnits(vbox, sheet, claims, u.uid, true); renderMine(); applyPresence();
+        if (pendingPaste) { const pp = pendingPaste; pendingPaste = null; const t = [...host.querySelectorAll('td.ed')].find(x => x.dataset.k === pp.key); if (t) view._t.pasteGrid(t, pp.grid); }
       } catch (e) { console.error(e); vbox.textContent = '서식을 불러오지 못했습니다: ' + e.message; }
       building = false; if (dirty) requestBuild();
     };
     const editing = () => { const a = document.activeElement; return !!(a && a.closest && vbox.contains(a) && a.closest('td.ed')); };
     const requestBuild = () => { if (editing()) { dirty = true; return; } build(); };
     vbox.addEventListener('focusout', () => setTimeout(() => { if (dirty && !building && !editing()) build(); }, 350));
-    const addRow = async d => {
-      if (isClosed(sheet)) return toast('마감되어 행을 추가할 수 없습니다.');
-      const id = ref.collection('rows').doc().id; pendingFocus = id;
-      try { await ref.collection('rows').doc(id).set({ si: +d.si, after: d.rk, root: +d.root, src: +d.src, by: u.uid, name: me.name, dept: me.dept, ts: Date.now(), at: TS() }); }
-      catch (e) { pendingFocus = null; console.error(e); toast('행 추가 실패 [' + (e.code || '') + ']' + (e.code === 'permission-denied' ? ': 권한이 없거나 마감되었습니다. (Firestore 규칙에 rows 항목이 게시되었는지 확인해 주세요)' : ': ' + e.message)); }
+    const addRows = async (d, n, foc) => {
+      if (isClosed(sheet)) { toast('마감되어 추가할 수 없습니다.'); return null; }
+      n = Math.max(1, Math.min(50, n || 1));
+      const col = ref.collection('rows'), kindF = d.type ? { type: d.type, sec: +d.sec, ...(d.t !== undefined ? { t: +d.t } : {}) } : { si: +d.si }, ids = [], b = db.batch(), t0 = Date.now();
+      let after = d.rk;
+      for (let i = 0; i < n; i++) { const id = col.doc().id; ids.push(id); b.set(col.doc(id), { ...kindF, after, root: +d.root, src: +d.src, by: u.uid, name: me.name, dept: me.dept, ts: t0 + i, at: TS() }); after = id; }
+      pendingFocus = { id: ids[0], col: foc && foc.col };
+      try { await b.commit(); return ids; }
+      catch (e) { pendingFocus = null; console.error(e); toast('추가 실패 [' + (e.code || '') + ']' + (e.code === 'permission-denied' ? ': 권한이 없거나 마감되었습니다. (Firestore 규칙에 rows 항목이 게시되었는지 확인해 주세요)' : ': ' + e.message)); return null; }
+    };
+    const gutterOf = td => { const tr = td.closest('tr'); return tr && tr.querySelector('td.rh'); };
+    opt.onAppend = async td => { const g = gutterOf(td); if (!g || !g.dataset.rk || !gutterOn()) return; await addRows(g.dataset, 1, { col: td._p && td._p.c }); };
+    opt.onExpand = async (td, grid, need) => {
+      if (!gutterOn()) return false; const tb = td.closest('table'); if (!tb) return false;
+      const trs = tb.querySelectorAll('tr'), g = trs[trs.length - 1].querySelector('td.rh'); if (!g || !g.dataset.rk) return false;
+      if (!confirm(`붙여넣은 내용이 표보다 ${need}행 더 깁니다. 표 아래에 ${need}개 행을 추가해서 붙여넣을까요?`)) return false;
+      pendingPaste = { key: td.dataset.k, grid };
+      const ids = await addRows(g.dataset, need, { col: td._p && td._p.c });
+      if (!ids) { pendingPaste = null; return false; } pendingFocus = null; return true;
+    };
+    const labelOf = t => {
+      const el = vbox.querySelector(`[data-mk="${t}"]`) || vbox.querySelector(`td[data-ck="${t}"]`);
+      const kind = t.startsWith('xr_') ? '행' : t.startsWith('r_') ? '표 행' : t.startsWith('c_') ? '표 열' : '본문';
+      const txt = el ? el.textContent.replace(/[＋－×↺]/g, '').replace(/\s+/g, ' ').trim().slice(0, 30) : '';
+      return kind + (txt ? ': ' + txt : '');
+    };
+    const setMarks = async (targets, on) => {
+      const b = db.batch();
+      targets.forEach(t => { const r = ref.collection('marks').doc(t); if (on) b.set(r, { k: t, label: labelOf(t), by: u.uid, name: me.name, dept: me.dept, at: TS() }); else b.delete(r); });
+      try { await b.commit(); } catch (e) { toast('삭제 표시 실패 [' + (e.code || '') + ']' + (e.code === 'permission-denied' ? ' (Firestore 규칙에 marks 항목이 게시되었는지 확인해 주세요)' : '')); }
+    };
+    const markClick = async (t, shift) => {
+      if (isClosed(sheet)) return toast('마감되어 변경할 수 없습니다.');
+      const on = !marks[t]; let targets = [t];
+      if (shift && lastMark && markGroup(lastMark) === markGroup(t)) {
+        const list = markTargetsInGroup(vbox, markGroup(t)), i = list.indexOf(lastMark), j = list.indexOf(t);
+        if (i >= 0 && j >= 0) targets = list.slice(Math.min(i, j), Math.max(i, j) + 1).filter(x => !!marks[x] !== on);
+      }
+      lastMark = t; await setMarks(targets, on);
+      if (on && targets.length > 1) toast(`${targets.length}개 항목을 삭제 표시했습니다.`);
     };
     const delRow = async d => {
       const meta = allRows.find(x => x.id === d.rk); if (!meta || meta.by !== u.uid) return;
       if (allRows.some(x => x.after === d.rk)) return toast('이 행 아래에 다른 행이 추가되어 있어 삭제할 수 없습니다.');
-      const cs = Object.values(allCells).filter(c => c.kind === 'x' && c.si === meta.si && String(c.addr).endsWith('@' + d.rk) && c.v !== '');
+      const cs = Object.values(allCells).filter(c => c.v !== '' && (c.kind === 'x' ? (c.si === meta.si && String(c.addr).endsWith('@' + d.rk)) : String(c.k).split('_').includes('n' + d.rk)));
       if (cs.some(c => c.by !== u.uid)) return toast('다른 사람이 입력한 내용이 있어 삭제할 수 없습니다.');
-      if (!confirm('내가 추가한 이 행을 삭제할까요?' + (cs.length ? ` (입력한 ${cs.length}칸의 내용도 함께 지워집니다)` : ''))) return;
+      if (!confirm('내가 추가한 이 항목을 삭제할까요?' + (cs.length ? ` (입력한 ${cs.length}칸의 내용도 함께 지워집니다)` : ''))) return;
       try {
         const b = db.batch(); cs.forEach(c => b.update(ref.collection('cells').doc(c.k), { v: '', at: TS() })); b.delete(ref.collection('rows').doc(d.rk)); await b.commit();
-        toast('행을 삭제했습니다.');
+        toast('삭제했습니다.');
       } catch (e) { console.error(e); toast('행 삭제 실패 [' + (e.code || '') + ']: ' + e.message); }
     };
     vbox.addEventListener('click', async e => {
-      const b = e.target.closest && e.target.closest('button.rb'); const g = b && b.closest('td.rh'); if (!g) return;
-      b.disabled = true; try { if (b.dataset.act === 'add') await addRow(g.dataset); else await delRow(g.dataset); } finally { b.disabled = false; }
+      const b = e.target.closest && e.target.closest('button.rb'); const g = b && b.closest('td.rh, td.ch, div.twh'); if (!g) return;
+      b.disabled = true;
+      try {
+        if (b.dataset.act === 'add') { let n = 1; if (e.shiftKey) { n = parseInt(prompt('몇 개를 추가할까요? (최대 50)', '5'), 10); if (!(n >= 1)) return; } await addRows(g.dataset, n); }
+        else if (b.dataset.act === 'mark') await markClick(g.dataset.mkt, e.shiftKey);
+        else await delRow(g.dataset);
+      } finally { b.disabled = false; }
     });
     subs.push(ref.collection('cells').onSnapshot(s => { s.docChanges().forEach(ch => { if (ch.type !== 'removed') { const dt = ch.doc.data({ serverTimestamps: 'estimate' }); allCells[ch.doc.id] = dt; if (view) view.update(ch.doc.id, dt); } }); renderMine(); }, e => toast('입력 내용을 불러오지 못했습니다 [' + (e.code || '') + ']')));
     subs.push(ref.collection('presence').onSnapshot(s => { presDocs = {}; s.forEach(d => presDocs[d.id] = d.data()); applyPresence(); }, () => { }));
+    subs.push(ref.collection('marks').onSnapshot(s => { marks = {}; s.forEach(d => marks[d.id] = d.data()); applyMarks(vbox, marks); }, () => { }));
+    const claimsOf = () => Object.keys(claims).filter(k => claims[k].uid === u.uid).map(Number);
+    const showUnits = () => {
+      if (document.getElementById('umodal')) return;
+      const m = document.createElement('div'); m.className = 'modal'; m.id = 'umodal';
+      const draw = () => {
+        m.innerHTML = `<div class="box" style="width:460px"><h2 style="margin:0 0 6px">내 쪽 선택</h2><p class="muted" style="margin:0 0 8px">입력할 쪽을 눌러 선택하세요. 다른 사람이 선택한 쪽은 입력할 수 없습니다. 내 쪽을 다시 누르면 선택이 해제됩니다.</p><div style="max-height:50vh;overflow:auto">${Array.from({ length: sheet.units }, (_, i) => { const c = claims[i], mine = c && c.uid === u.uid, same = c && !mine && c.name === me.name && (c.dept || '') === (me.dept || ''); return `<button data-u="${i}" style="display:block;width:100%;text-align:left;margin:3px 0;${mine ? 'background:#dcfce7;' : c && !same ? 'opacity:.55;' : ''}">${esc(unitName(sheet, i))} — ${mine ? '✔ 내 쪽' : c ? esc(c.name || '') + (c.dept ? ' (' + esc(c.dept) + ')' : '') + (same ? ' · 같은 이름: 눌러서 이어받기' : '') : '비어 있음'}</button>`; }).join('')}</div><div class="row" style="margin-top:12px;justify-content:flex-end"><button id="ucl">닫기</button></div></div>`;
+        m.querySelector('#ucl').onclick = () => m.remove();
+        m.querySelectorAll('[data-u]').forEach(b => b.onclick = async () => {
+          const i = +b.dataset.u, cr = ref.collection('claims').doc(String(i));
+          try {
+            const mine = claims[i] && claims[i].uid === u.uid;
+            if (mine) await cr.delete();
+            else await db.runTransaction(async tx => {
+              const sn = await tx.get(cr);
+              if (sn.exists) { const d = sn.data(); if (d.uid !== u.uid && !(d.name === me.name && (d.dept || '') === (me.dept || ''))) throw new Error('TAKEN'); }
+              tx.set(cr, { uid: u.uid, name: me.name, dept: me.dept || '', at: TS() });
+            });
+          } catch (e) { toast(e.message === 'TAKEN' ? '방금 다른 사람이 먼저 선택했습니다.' : '선택 실패 [' + (e.code || '') + ']' + (e.code === 'permission-denied' ? ' (Firestore 규칙에 claims 항목이 게시되었는지 확인해 주세요)' : '')); }
+        });
+      };
+      m._draw = draw; draw(); document.body.appendChild(m);
+    };
+    if ($('#um')) $('#um').onclick = showUnits;
+    if (sheet.units > 1) subs.push(ref.collection('claims').onSnapshot(s => {
+      claims = {}; s.forEach(d => claims[+d.id] = d.data());
+      applyUnits(vbox, sheet, claims, u.uid, true);
+      const m = document.getElementById('umodal'); if (m && m._draw) m._draw();
+      if (!claimsOf().length && !showUnits.shown) { showUnits.shown = true; showUnits(); }
+    }, () => { }));
     subs.push(ref.collection('rows').onSnapshot(s => {
       allRows = s.docs.map(d => ({ id: d.id, ...d.data() }));
       const sig = allRows.map(d => d.id + d.after).sort().join('|');
@@ -1219,7 +1685,7 @@ async function deleteSheet(id, pre) {
   try {
     if (pre) pre();
     const ref = db.collection('sheets').doc(id);
-    for (const c of ['cells', 'log', 'people', 'rows', 'presence', 'chunks']) for (;;) { const s = await ref.collection(c).limit(400).get(); if (s.empty) break; const b = db.batch(); s.docs.forEach(d => b.delete(d.ref)); await b.commit(); }
+    for (const c of ['cells', 'log', 'people', 'rows', 'presence', 'marks', 'claims', 'chunks']) for (;;) { const s = await ref.collection(c).limit(400).get(); if (s.empty) break; const b = db.batch(); s.docs.forEach(d => b.delete(d.ref)); await b.commit(); }
     await ref.delete(); toast('삭제했습니다.'); return true;
   } catch (e) { toast('삭제 실패: ' + e.message); return false; }
 }
@@ -1230,7 +1696,7 @@ function editModal(sheet, onDone) {
     <label>제목</label><input id="et" style="width:100%" value="${esc(sheet.title)}">
     <label>마감 일시 (비우면 마감 없음)</label><input type="datetime-local" id="ed" value="${dl}">
     <label><input type="checkbox" id="ea" ${sheet.allowFilled ? 'checked' : ''}> 이미 내용이 있는 칸도 수정 가능</label>
-    ${sheet.type === 'xlsx' ? `<label><input type="checkbox" id="er2" ${sheet.allowAddRows ? 'checked' : ''}> 입력자가 표에 행 추가 허용 (같은 서식의 행을 아래에 추가)</label>` : ''}
+    <label><input type="checkbox" id="er2" ${sheet.allowAddRows ? 'checked' : ''}> 입력자가 행·열·본문 줄 추가 허용 (같은 서식으로 추가)</label>
     <label>비밀번호 ${sheet.pwHash ? '(설정됨)' : '(없음)'}</label><input id="ep" style="width:100%" placeholder="바꾸려면 새 비밀번호 입력, 그대로 두려면 비워 두세요">
     ${sheet.pwHash ? '<label><input type="checkbox" id="er"> 비밀번호 삭제</label>' : ''}
     <div class="muted" style="margin-top:6px">파일 내용 자체는 바꿀 수 없습니다. 서식을 바꾸려면 새로 등록해 주세요.</div>
@@ -1257,7 +1723,9 @@ function newForm(u) {
     <label>파일 (.xlsx 또는 .hwpx, 5MB 이하)</label><input type="file" id="nf" accept=".xlsx,.hwpx">
     <div class="muted">.xls / .hwp 파일은 엑셀·한글에서 .xlsx / .hwpx로 다시 저장한 뒤 올려 주세요.</div>
     <label><input type="checkbox" id="na"> 이미 내용이 있는 칸도 수정 가능하게 (기본: 빈 칸만 입력)</label>
-    <label><input type="checkbox" id="nr" checked> 입력자가 표에 행 추가 허용 (엑셀만 · 같은 서식의 행을 아래에 추가)</label>
+    <label>같은 서식을 몇 장 복사할까요? (선택, 1쪽짜리 서식을 여러 명에게 받을 때)</label><input id="nu" type="number" min="1" max="50" style="width:100px" placeholder="예: 10"> <span class="muted">입력하면 서식을 그 수만큼 복사하고, 입력자가 자기 쪽을 선택합니다.</span>
+    <label>쪽 이름 (선택, 한 줄에 하나씩)</label><textarea id="nn" rows="3" style="width:100%" placeholder="예:&#10;총무팀&#10;기획팀"></textarea>
+    <label><input type="checkbox" id="nr" checked> 입력자가 행·열·본문 줄 추가 허용 (엑셀은 행, 한글은 표의 행·열과 본문 줄)</label>
     <label>비밀번호 (선택)</label><input id="np" placeholder="없으면 비워 두세요">
     <label>마감 일시 (선택)</label><input type="datetime-local" id="nd">
     <div class="row" style="margin-top:16px"><button class="pri" id="ns">등록하고 링크 만들기</button><button id="nc">취소</button></div></div></div>`;
@@ -1270,8 +1738,17 @@ function newForm(u) {
     if (f.size > MAX_FILE) return toast('파일이 5MB를 넘습니다.');
     const btn = $('#ns'); btn.disabled = true; btn.textContent = '등록 중…';
     try {
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      const sheetData = { title: title || f.name.replace(/\.[^.]+$/, ''), type: ext, fileName: f.name, allowFilled: $('#na').checked, allowAddRows: ext === 'xlsx' && $('#nr').checked, closed: false, ownerUid: u.uid, ownerName: u.displayName || u.email || '', createdAt: TS() };
+      let bytes = new Uint8Array(await f.arrayBuffer());
+      const sheetData = { title: title || f.name.replace(/\.[^.]+$/, ''), type: ext, fileName: f.name, allowFilled: $('#na').checked, allowAddRows: $('#nr').checked, closed: false, ownerUid: u.uid, ownerName: u.displayName || u.email || '', createdAt: TS() };
+      const N = parseInt($('#nu').value, 10) || 1;
+      if (N > 1) {
+        if (N > 50) throw new Error('복사 개수는 50장까지입니다.');
+        const names = $('#nn').value.split('\n').map(x => x.trim()).filter(Boolean);
+        if (ext === 'xlsx') bytes = await replicateXlsx(bytes, N, names);
+        else { const r = await replicateHwpx(bytes, N); bytes = r.bytes; sheetData.unitSize = r.unitSize; }
+        if (bytes.length > MAX_FILE) throw new Error('복사한 파일이 5MB를 넘습니다. 복사 개수를 줄여 주세요.');
+        sheetData.units = N; sheetData.unitNames = Array.from({ length: N }, (_, i) => names[i] || (i + 1) + '쪽');
+      }
       const test = await renderFile(sheetData, bytes);
       if (!test.panes.some(p => p.html.includes('class="ed"'))) { if (!confirm('입력 가능한 빈 칸을 찾지 못했습니다. 그래도 등록할까요?')) throw new Error('취소됨'); }
       const ref = db.collection('sheets').doc();
@@ -1293,16 +1770,16 @@ async function adminDetail(id) {
   let snap; try { snap = await ref.get(); } catch (e) { toast('열 수 없습니다.'); return dashboard(u); }
   if (!snap.exists) return dashboard(u);
   let sheet = { id, ...snap.data() };
-  let view = null, people = {}, tab = 'res';
+  let view = null, people = {}, tab = 'res', allMarks = {}, hideDel = false, allClaims = {};
   app.innerHTML = adminBar(u) + `<div class="wrap">
     <div class="card"><div class="row"><h2 style="margin:0;flex:1" id="tt"></h2><button id="bk">← 목록</button></div>
       <div class="row" style="margin-top:10px"><input id="lk" readonly style="flex:1;min-width:220px" value="${esc(linkOf(id))}"><button id="cp">링크 복사</button></div>
       <div class="muted" style="margin-top:6px" id="meta"></div>
       <div class="row" style="margin-top:10px"><button class="pri" id="dl">취합 파일 다운로드 (원본 서식)</button><button id="dp">입력자·이력 엑셀</button><button id="ei">정보 수정</button><button id="tg"></button><button class="dan" id="rm">삭제</button></div>
       <div class="muted" style="margin-top:6px">다운로드 파일에는 입력자 정보가 섞이지 않습니다. 엑셀의 차트·그림 등 일부 요소는 변환 과정에서 빠질 수 있으니 중요한 서식은 확인해 주세요.</div></div>
-    <div class="card"><div class="tabs"><button data-t="res" class="on">입력 결과</button><button data-t="ppl">입력자</button><button data-t="log">이력</button></div>
-      <div id="p_res"><div class="row" style="margin-bottom:8px"><span>입력자별 보기</span><select id="fl"><option value="">전체</option></select><span class="muted" id="stat"></span></div><div id="vbox">서식을 불러오는 중…</div></div>
-      <div id="p_ppl" style="display:none"></div><div id="p_log" style="display:none"></div></div></div>`;
+    <div class="card"><div class="tabs"><button data-t="res" class="on">입력 결과</button><button data-t="ppl">입력자</button><button data-t="log">이력</button><button data-t="del">삭제 표시</button>${sheet.units > 1 ? '<button data-t="uni">쪽 배정</button>' : ''}</div>
+      <div id="p_res"><div class="row" style="margin-bottom:8px"><span>입력자별 보기</span><select id="fl"><option value="">전체</option></select><span class="muted" id="stat"></span><label class="muted"><input type="checkbox" id="hd"> 삭제 표시된 항목 숨기기</label></div><div id="vbox">서식을 불러오는 중…</div></div>
+      <div id="p_ppl" style="display:none"></div><div id="p_log" style="display:none"></div><div id="p_del" style="display:none"></div><div id="p_uni" style="display:none"></div></div></div>`;
   bindBar();
   const paintHead = () => {
     $('#tt').textContent = sheet.title;
@@ -1324,6 +1801,15 @@ async function adminDetail(id) {
     const cur = $('#fl').value;
     $('#fl').innerHTML = '<option value="">전체</option>' + ps.map(p => `<option value="${esc(p.uid)}" ${p.uid === cur ? 'selected' : ''}>${esc(p.name)}${p.dept ? ' (' + esc(p.dept) + ')' : ''} · ${p.n}칸</option>`).join('');
     $('#stat').textContent = view ? `입력된 칸 ${cellList().length} / 입력 가능한 칸 ${view.count} · 참여 ${ps.length}명${getRows().length ? ' · 추가된 행 ' + getRows().length + '개' : ''}` : '';
+    if (tab === 'uni') {
+      $('#p_uni').innerHTML = `<div class="muted" style="margin-bottom:6px">입력자가 선택한 쪽입니다. 잘못 선택했거나 담당자가 바뀌면 [해제]하세요. (다른 쪽 잠금은 화면에서만 적용됩니다)</div><table class="list"><tr><th>쪽</th><th>담당자</th><th>선택 일시</th><th></th></tr>${Array.from({ length: sheet.units }, (_, i) => { const c = allClaims[i]; return `<tr><td>${esc(unitName(sheet, i))}</td><td>${c ? esc(c.name || '') + (c.dept ? ' (' + esc(c.dept) + ')' : '') : '<span class="muted">비어 있음</span>'}</td><td>${c ? fmt(c.at) : ''}</td><td>${c ? `<button data-rl="${i}">해제</button>` : ''}</td></tr>`; }).join('')}</table>`;
+      $('#p_uni').querySelectorAll('[data-rl]').forEach(b => b.onclick = () => ref.collection('claims').doc(b.dataset.rl).delete().catch(e => toast('해제 실패: ' + e.message)));
+    }
+    if (tab === 'del') {
+      const ms = Object.values(allMarks).sort((a, b) => (b.at && b.at.toMillis ? b.at.toMillis() : 0) - (a.at && a.at.toMillis ? a.at.toMillis() : 0));
+      $('#p_del').innerHTML = ms.length ? `<div class="muted" style="margin-bottom:6px">다운로드하면 아래 항목이 실제로 삭제됩니다. 필요하면 복원하세요.</div><table class="list"><tr><th>항목</th><th>표시한 사람</th><th>일시</th><th></th></tr>${ms.map(m => `<tr><td>${esc(m.label || m.k)}</td><td>${esc(m.name || '')}${m.dept ? ' (' + esc(m.dept) + ')' : ''}</td><td>${fmt(m.at)}</td><td><button data-rm="${esc(m.k)}">복원</button></td></tr>`).join('')}</table>` : '<p class="muted">삭제 표시된 항목이 없습니다.</p>';
+      $('#p_del').querySelectorAll('[data-rm]').forEach(b => b.onclick = () => ref.collection('marks').doc(b.dataset.rm).delete().catch(e => toast('복원 실패: ' + e.message)));
+    }
     if (tab === 'ppl') $('#p_ppl').innerHTML = ps.length ? `<table class="list"><tr><th>이름</th><th>부서</th><th>입력한 칸</th><th>최근 입력</th><th></th></tr>${ps.map(p => `<tr><td><span class="legend"><span style="background:hsl(${hue(p.uid)} 75% 90%)">${esc(p.name)}</span></span></td><td>${esc(p.dept || '')}</td><td>${p.n}</td><td>${fmt(p.last)}</td><td><button data-u="${esc(p.uid)}">이 사람이 입력한 칸 보기</button></td></tr>`).join('')}</table>` : '<p class="muted">아직 참여한 사람이 없습니다.</p>';
     if (tab === 'ppl') $('#p_ppl').querySelectorAll('[data-u]').forEach(b => b.onclick = () => { $('#fl').value = b.dataset.u; showTab('res'); view && view.setFilter(b.dataset.u); });
   };
@@ -1335,7 +1821,7 @@ async function adminDetail(id) {
   const showTab = t => {
     tab = t;
     document.querySelectorAll('[data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === t));
-    ['res', 'ppl', 'log'].forEach(x => $('#p_' + x).style.display = x === t ? '' : 'none');
+    ['res', 'ppl', 'log', 'del', 'uni'].forEach(x => $('#p_' + x).style.display = x === t ? '' : 'none');
     if (t === 'log') loadLog(); else refresh();
   };
   document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => showTab(b.dataset.t));
@@ -1353,7 +1839,7 @@ async function adminDetail(id) {
         const r = await renderFile(sheet, bytes, { rows: allRows });
         view = mountView(vb, r, { editable: false });
         for (const k in allCells) view.update(k, allCells[k]);
-        view.setFilter($('#fl').value);
+        view.setFilter($('#fl').value); applyMarks(vb, allMarks); applyUnits(vb, sheet, allClaims, '', false); vb.classList.toggle('hidedel', hideDel);
         const tb = vb.querySelectorAll('[data-tab]')[tabI]; if (tb && tabI) tb.click();
         vb.querySelectorAll('.pane').forEach((p, i) => { if (sc[i]) { p.scrollLeft = sc[i][0]; p.scrollTop = sc[i][1]; } });
         refresh();
@@ -1361,6 +1847,9 @@ async function adminDetail(id) {
       building = false; if (again) build();
     };
     getRows = () => allRows;
+    if (sheet.units > 1) subs.push(ref.collection('claims').onSnapshot(s => { allClaims = {}; s.forEach(d => allClaims[+d.id] = d.data()); applyUnits(vb, sheet, allClaims, '', false); refresh(); }, () => { }));
+    $('#hd').onchange = () => { hideDel = $('#hd').checked; vb.classList.toggle('hidedel', hideDel); };
+    subs.push(ref.collection('marks').onSnapshot(s => { allMarks = {}; s.forEach(d => allMarks[d.id] = d.data()); applyMarks(vb, allMarks); refresh(); }, () => { }));
     subs.push(ref.collection('cells').onSnapshot(s => { s.docChanges().forEach(ch => { if (ch.type !== 'removed') { const dt = ch.doc.data({ serverTimestamps: 'estimate' }); allCells[ch.doc.id] = dt; if (view) view.update(ch.doc.id, dt); } }); refresh(); }));
     subs.push(ref.collection('rows').onSnapshot(s => {
       allRows = s.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -1375,7 +1864,7 @@ async function adminDetail(id) {
     if (!view) return; const b = $('#dl'); b.disabled = true;
     try {
       const list = cellList().concat(Object.values(view.cells).filter(r => r.v === ''));
-      const blob = sheet.type === 'xlsx' ? await buildXlsx(bytes, list, getRows()) : await buildHwpx(bytes, list, sheet);
+      const blob = sheet.type === 'xlsx' ? await buildXlsx(bytes, list, getRows(), Object.keys(allMarks)) : await buildHwpx(bytes, list, sheet, getRows(), Object.keys(allMarks));
       dlBlob(blob, sheet.fileName.replace(/\.[^.]+$/, '') + '_취합.' + sheet.type);
     } catch (e) { toast('다운로드 실패: ' + e.message); }
     b.disabled = false;
