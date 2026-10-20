@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>링크 입력 취합</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:'Malgun Gothic','Apple SD Gothic Neo',system-ui,sans-serif;background:#eef0f3;color:#222;font-size:14px}
+.top{height:6px;background:linear-gradient(90deg,#f59e0b 33%,#22c55e 33% 66%,#3b82f6 66%)}
+.bar{background:#fff;border-bottom:1px solid #dde1e6;padding:10px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.bar h1{font-size:17px;margin:0;flex:1}
+.wrap{max-width:1280px;margin:0 auto;padding:14px}
+.card{background:#fff;border-radius:10px;padding:16px;box-shadow:0 1px 3px #0002;margin-bottom:12px}
+.card h2{margin:0 0 10px;font-size:16px}
+button,.btn{font:inherit;border:1px solid #cfd4da;background:#fff;border-radius:7px;padding:7px 12px;cursor:pointer}
+button:hover{background:#f4f6f8}
+button.pri{background:#2563eb;color:#fff;border-color:#2563eb}
+button.pri:hover{background:#1d4ed8}
+button.dan{color:#b91c1c;border-color:#e7b4b4}
+button:disabled{opacity:.5;cursor:default}
+input,select{font:inherit;padding:7px 9px;border:1px solid #cfd4da;border-radius:7px;max-width:100%}
+label{display:block;margin:10px 0 4px;font-weight:600}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.muted{color:#6b7280;font-size:13px}
+.warn{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:8px;padding:10px 12px;margin:10px 0}
+.tabs{display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap}
+.tabs button.on{background:#2563eb;color:#fff;border-color:#2563eb}
+table.list{border-collapse:collapse;width:100%}
+table.list th,table.list td{border-bottom:1px solid #eceff2;padding:8px 6px;text-align:left}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;background:#e5e7eb}
+.badge.ok{background:#dcfce7;color:#166534}.badge.no{background:#fee2e2;color:#991b1b}
+.scroll{overflow:auto;max-height:72vh;border:1px solid #e3e6ea;background:#fff}
+table.xt,table.ht{border-collapse:collapse;table-layout:fixed;background:#fff}
+table.xt td,table.ht td{white-space:pre-wrap;word-break:break-all;padding:2px 4px;vertical-align:middle;font-size:13px;overflow:hidden}
+table.ht{margin:8px;table-layout:auto}
+table.ht td{border:1px solid #999}
+table.ht td.lk{background:#f6f6f6}
+td.ed{cursor:text;outline:1px dashed #93c5fd;outline-offset:-1px}
+td.ed:focus{outline:2px solid #2563eb;background:#eff6ff!important}
+td.ed select{width:100%;border:0;background:transparent}
+.hp{padding:3px 10px;white-space:pre-wrap;font-size:13px}
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#111;color:#fff;padding:10px 16px;border-radius:8px;display:none;z-index:99;max-width:90vw}
+.modal{position:fixed;inset:0;background:#0006;display:flex;align-items:center;justify-content:center;z-index:50;padding:12px}
+.modal .box{background:#fff;border-radius:12px;padding:20px;width:380px;max-width:100%}
+.center{max-width:460px;margin:60px auto;text-align:center}
+.legend span{display:inline-block;padding:2px 8px;border-radius:10px;margin:2px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="top"></div>
+<div id="app"></div>
+<div id="toast"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+/* ================= 설정 (여기만 수정) =================
+ * Firebase 콘솔 > 프로젝트 설정 > 내 앱(웹)의 firebaseConfig 값을 붙여 넣으세요.
+ * 필요 설정: Authentication에서 "익명"과 "Google" 로그인 사용, 승인된 도메인에 배포 주소(예: xxx.github.io) 추가,
+ *            Firestore에 함께 제공한 firestore.rules 적용
+ */
+const FIREBASE_CONFIG = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  projectId: "YOUR_PROJECT",
+  appId: "YOUR_APP_ID"
+};
+// 관리자(파일 등록자)로 허용할 이메일 도메인. 비워 두면 모든 구글 계정 허용. 예: ['korea.kr']
+const ADMIN_EMAIL_DOMAINS = [];
+/* ===================================================== */
+
+const MAX_FILE = 5 * 1024 * 1024, CHUNK = 700000;
+const $ = s => document.querySelector(s);
+const app = $('#app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let toastT;
+function toast(m) { const t = $('#toast'); t.textContent = m; t.style.display = 'block'; clearTimeout(toastT); toastT = setTimeout(() => t.style.display = 'none', 3200); }
+function fmt(ts) { if (!ts) return '방금'; const d = ts.toDate ? ts.toDate() : new Date(ts); return d.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+function hue(uid) { let h = 0; for (const c of String(uid)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
+async function sha(s) { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join(''); }
+const bytesToB64 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const b64ToBytes = b => { const s = atob(b); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; };
+function dlBlob(blob, name) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500); }
+const isClosed = s => s.closed === true || (s.deadlineAt && s.deadlineAt.toDate() < new Date());
+
+if (!window.firebase || FIREBASE_CONFIG.apiKey.startsWith('YOUR')) {
+  app.innerHTML = '<div class="card center"><h2>Firebase 설정이 필요합니다</h2><p>파일 상단의 <b>FIREBASE_CONFIG</b>에 Firebase 웹앱 설정값을 넣은 뒤 다시 열어 주세요.</p></div>';
+  throw new Error('no config');
+}
+firebase.initializeApp(FIREBASE_CONFIG);
+const auth = firebase.auth();
+const db = firebase.firestore();
+db.settings({ ignoreUndefinedProperties: true, experimentalAutoDetectLongPolling: true, merge: true });
+const TS = firebase.firestore.FieldValue.serverTimestamp;
+
+/* ---------- 파일 저장/읽기 (Firestore 조각 저장) ---------- */
+async function loadBytes(id) {
+  const snap = await db.collection('sheets').doc(id).collection('chunks').orderBy('n').get();
+  let s = ''; snap.forEach(d => s += d.data().d);
+  return b64ToBytes(s);
+}
+
+/* ---------- XML 도우미 (hwpx) ---------- */
+const kids = (el, n) => [...el.children].filter(c => c.localName === n);
+const kid = (el, n) => kids(el, n)[0];
+const all = (el, n) => [...el.getElementsByTagNameNS('*', n)];
+const within = (el, n) => { for (let p = el.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === n) return true; return false; };
+
+/* ---------- 엑셀 렌더링 ---------- */
+function xStyle(cell) {
+  let s = ''; const f = cell.font || {};
+  if (f.bold) s += 'font-weight:700;'; if (f.italic) s += 'font-style:italic;';
+  if (f.size) s += `font-size:${Math.round(f.size * 1.33)}px;`;
+  if (f.color && f.color.argb) s += `color:#${f.color.argb.slice(2)};`;
+  const fl = cell.fill;
+  if (fl && fl.type === 'pattern' && fl.pattern === 'solid' && fl.fgColor && fl.fgColor.argb) s += `background:#${fl.fgColor.argb.slice(2)};`;
+  const al = cell.alignment || {};
+  if (al.horizontal) s += `text-align:${al.horizontal === 'centerContinuous' ? 'center' : al.horizontal};`;
+  s += `vertical-align:${al.vertical === 'top' ? 'top' : al.vertical === 'bottom' ? 'bottom' : 'middle'};`;
+  const b = cell.border || {};
+  for (const side of ['top', 'left', 'bottom', 'right']) s += b[side] && b[side].style ? `border-${side}:1px solid #555;` : `border-${side}:1px solid #e4e4e4;`;
+  return s;
+}
+async function renderXlsx(bytes, sheet) {
+  const wb = new ExcelJS.Workbook(); await wb.xlsx.load(bytes);
+  const panes = [];
+  wb.worksheets.forEach((ws, si) => {
+    if (ws.state && ws.state !== 'visible') return;
+    const merges = {}, covered = new Set();
+    ((ws.model && ws.model.merges) || []).forEach(m => {
+      const [a, b] = m.split(':'); const ca = ws.getCell(a), cb = ws.getCell(b);
+      merges[a] = { rs: cb.row - ca.row + 1, cs: cb.col - ca.col + 1 };
+      for (let r = ca.row; r <= cb.row; r++) for (let c = ca.col; c <= cb.col; c++) if (r !== ca.row || c !== ca.col) covered.add(r + ',' + c);
+    });
+    const R = Math.min(ws.rowCount || 1, 500), C = Math.min(ws.columnCount || 1, 60);
+    let cols = '';
+    for (let c = 1; c <= C; c++) { const col = ws.getColumn(c); if (col.hidden) continue; cols += `<col style="width:${Math.round((col.width || 8.43) * 7 + 5)}px">`; }
+    let h = `<table class="xt"><colgroup>${cols}</colgroup>`;
+    for (let r = 1; r <= R; r++) {
+      const row = ws.getRow(r); if (row.hidden) continue;
+      h += `<tr style="height:${row.height ? Math.round(row.height * 1.33) : 20}px">`;
+      for (let c = 1; c <= C; c++) {
+        if (ws.getColumn(c).hidden || covered.has(r + ',' + c)) continue;
+        const cell = ws.getCell(r, c); const m = merges[cell.address];
+        let text = ''; try { text = cell.text || ''; } catch (e) { }
+        const isF = cell.type === ExcelJS.ValueType.Formula;
+        const ed = !isF && (sheet.allowFilled || text === '');
+        const span = m ? ` colspan="${m.cs}" rowspan="${m.rs}"` : '';
+        if (!ed) { h += `<td class="lk"${span} style="${xStyle(cell)}">${esc(text)}</td>`; continue; }
+        const loc = { kind: 'x', si, addr: cell.address };
+        let inner = esc(text);
+        const dv = cell.dataValidation;
+        if (dv && dv.type === 'list' && dv.formulae && /^"/.test(dv.formulae[0] || '')) {
+          const opts = dv.formulae[0].slice(1, -1).split(',');
+          inner = `<select><option value=""></option>${opts.map(o => `<option>${esc(o)}</option>`).join('')}</select>`;
+        }
+        h += `<td class="ed"${span} style="${xStyle(cell)}" data-k="x_${si}_${cell.address}" data-loc="${esc(JSON.stringify(loc))}" data-label="${esc(ws.name + ' ' + cell.address)}">${inner}</td>`;
+      }
+      h += '</tr>';
+    }
+    h += '</table>';
+    panes.push({ name: ws.name, html: h });
+  });
+  return { panes };
+}
+
+/* ---------- 한글(hwpx) 렌더링 ---------- */
+function hTable(tbl, ti, si) {
+  let h = '<table class="ht">';
+  for (const tr of kids(tbl, 'tr')) {
+    h += '<tr>';
+    for (const tc of kids(tr, 'tc')) {
+      const ad = kid(tc, 'cellAddr'), sp = kid(tc, 'cellSpan'), sz = kid(tc, 'cellSz'), sub = kid(tc, 'subList');
+      const r = +(ad && ad.getAttribute('rowAddr') || 0), c = +(ad && ad.getAttribute('colAddr') || 0);
+      const cs = +(sp && sp.getAttribute('colSpan') || 1), rs = +(sp && sp.getAttribute('rowSpan') || 1);
+      const w = Math.round(+(sz && sz.getAttribute('width') || 0) / 75), hh = Math.round(+(sz && sz.getAttribute('height') || 0) / 75);
+      const paras = sub ? kids(sub, 'p').map(p => all(p, 't').map(t => t.textContent).join('')) : [];
+      const text = paras.join('\n'); const nested = sub && all(sub, 'tbl').length > 0;
+      const st = `width:${w}px;height:${hh}px;`;
+      if (!text.trim() && !nested) {
+        const loc = { kind: 'h', sec: si, t: ti, r, c };
+        h += `<td class="ed" colspan="${cs}" rowspan="${rs}" style="${st}" data-k="h_${si}_${ti}_${r}_${c}" data-loc="${esc(JSON.stringify(loc))}" data-label="표${ti + 1} ${r + 1}행 ${c + 1}열"></td>`;
+      } else h += `<td class="lk" colspan="${cs}" rowspan="${rs}" style="${st}">${esc(text).replace(/\n/g, '<br>')}</td>`;
+    }
+    h += '</tr>';
+  }
+  return h + '</table>';
+}
+async function renderHwpx(bytes) {
+  const zip = await JSZip.loadAsync(bytes);
+  const names = Object.keys(zip.files).filter(n => /^Contents\/section\d+\.xml$/i.test(n)).sort((a, b) => parseInt(a.match(/\d+/)[0]) - parseInt(b.match(/\d+/)[0]));
+  if (!names.length) throw new Error('hwpx 형식이 아닙니다.');
+  let html = '';
+  for (let si = 0; si < names.length; si++) {
+    const doc = new DOMParser().parseFromString(await zip.file(names[si]).async('string'), 'application/xml');
+    const tbls = all(doc.documentElement, 'tbl');
+    for (const p of kids(doc.documentElement, 'p')) {
+      const txt = all(p, 't').filter(t => !within(t, 'tbl')).map(t => t.textContent).join('');
+      if (txt.trim()) html += `<div class="hp">${esc(txt)}</div>`;
+      all(p, 'tbl').filter(t => !within(t, 'tc')).forEach(t => { html += hTable(t, tbls.indexOf(t), si); });
+    }
+  }
+  return { panes: [{ name: '문서', html }] };
+}
+const renderFile = (sheet, bytes) => sheet.type === 'xlsx' ? renderXlsx(bytes, sheet) : renderHwpx(bytes);
+
+/* ---------- 화면에 붙이기 (입력/조회 공용) ---------- */
+function mountView(box, r, opt) {
+  const multi = r.panes.length > 1;
+  box.innerHTML = (multi ? `<div class="tabs">${r.panes.map((p, i) => `<button data-tab="${i}" class="${i ? '' : 'on'}">${esc(p.name)}</button>`).join('')}</div>` : '') +
+    r.panes.map((p, i) => `<div class="pane scroll" data-pane="${i}" style="${i ? 'display:none' : ''}">${p.html}</div>`).join('');
+  box.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => {
+    box.querySelectorAll('[data-tab]').forEach(x => x.classList.toggle('on', x === b));
+    box.querySelectorAll('.pane').forEach(p => p.style.display = p.dataset.pane === b.dataset.tab ? '' : 'none');
+  });
+  const tds = [...box.querySelectorAll('td.ed')];
+  const byKey = new Map(tds.map(td => [td.dataset.k, td]));
+  tds.forEach(td => {
+    const sel = td.querySelector('select');
+    if (sel) sel.disabled = !opt.editable;
+    else if (opt.editable) { td.contentEditable = 'true'; td.spellcheck = false; }
+  });
+  const view = { cells: {}, filter: null, count: tds.length };
+  function paint(k) {
+    const td = byKey.get(k), rec = view.cells[k]; if (!td || !rec) return;
+    const sel = td.querySelector('select');
+    if (sel) { sel.value = rec.v; sel.dataset.prev = rec.v; }
+    else if (document.activeElement !== td) td.textContent = rec.v;
+    if (rec.v) {
+      td.style.background = `hsl(${hue(rec.by)} 75% 90%)`;
+      td.title = `${rec.name}${rec.dept ? ' (' + rec.dept + ')' : ''} · ${fmt(rec.at)}`;
+      td.style.opacity = (view.filter && rec.by !== view.filter) ? .25 : 1;
+    } else { td.style.background = ''; td.title = ''; td.style.opacity = 1; }
+  }
+  view.update = (k, rec) => { view.cells[k] = rec; paint(k); };
+  view.setFilter = u => { view.filter = u || null; for (const k in view.cells) paint(k); };
+  if (opt.editable) {
+    box.addEventListener('focusin', e => { const td = e.target.closest && e.target.closest('td.ed'); if (td && !e.target.matches('select')) td.dataset.old = td.textContent; });
+    box.addEventListener('focusout', async e => {
+      const td = e.target.closest && e.target.closest('td.ed');
+      if (!td || e.target.matches('select')) return;
+      const v = td.textContent.replace(/\u00a0/g, ' ').trim();
+      if (v === (td.dataset.old || '').trim()) return;
+      const ok = await opt.onSave(td, v);
+      if (ok === false) td.textContent = td.dataset.old || '';
+    });
+    box.addEventListener('change', async e => {
+      const s = e.target; if (s.tagName !== 'SELECT') return;
+      const ok = await opt.onSave(s.closest('td'), s.value);
+      if (ok === false) s.value = s.dataset.prev || '';
+    });
+    box.addEventListener('keydown', e => {
+      const td = e.target.closest && e.target.closest('td.ed');
+      if (td && e.key === 'Enter' && !e.target.matches('select')) { if (e.shiftKey && td.dataset.k[0] === 'x') return; e.preventDefault(); td.blur(); }
+    });
+    box.addEventListener('paste', e => {
+      const td = e.target.closest && e.target.closest('td.ed'); if (!td) return;
+      e.preventDefault(); document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').replace(/\r?\n/g, ' '));
+    });
+  }
+  return view;
+}
+
+/* ---------- 취합 결과를 원본 서식에 반영해 파일 만들기 ---------- */
+async function buildXlsx(bytes, cells) {
+  const wb = new ExcelJS.Workbook(); await wb.xlsx.load(bytes);
+  for (const rec of cells) {
+    if (rec.kind !== 'x') continue;
+    const ws = wb.worksheets[rec.si]; if (!ws) continue;
+    const t = String(rec.v).trim();
+    const num = /^-?\d+(\.\d+)?$/.test(t) && !/^-?0\d/.test(t) && t.replace(/[-.]/g, '').length <= 15;
+    ws.getCell(rec.addr).value = t === '' ? null : (num ? Number(t) : rec.v);
+  }
+  const buf = await wb.xlsx.writeBuffer();
+  return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+function setTcText(doc, tc, val) {
+  const sub = kid(tc, 'subList'); const p = sub && kids(sub, 'p')[0]; if (!p) return;
+  const NS = p.namespaceURI, pre = p.prefix ? p.prefix + ':' : '';
+  let run = kid(p, 'run');
+  if (!run) { run = doc.createElementNS(NS, pre + 'run'); run.setAttribute('charPrIDRef', p.getAttribute('paraPrIDRef') ? '0' : '0'); p.insertBefore(run, p.firstChild); }
+  let t = kid(run, 't');
+  if (!t) { t = doc.createElementNS(NS, pre + 't'); run.appendChild(t); }
+  t.textContent = val.replace(/\s*\n\s*/g, ' ');
+  kids(p, 'linesegarray').forEach(x => p.removeChild(x));
+}
+async function buildHwpx(bytes, cells) {
+  const zip = await JSZip.loadAsync(bytes);
+  const names = Object.keys(zip.files).filter(n => /^Contents\/section\d+\.xml$/i.test(n)).sort((a, b) => parseInt(a.match(/\d+/)[0]) - parseInt(b.match(/\d+/)[0]));
+  for (let si = 0; si < names.length; si++) {
+    const mine = cells.filter(r => r.kind === 'h' && r.sec === si && String(r.v).trim() !== '');
+    if (!mine.length) continue;
+    const xml = await zip.file(names[si]).async('string');
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    const tbls = all(doc.documentElement, 'tbl');
+    for (const rec of mine) {
+      const tbl = tbls[rec.t]; if (!tbl) continue;
+      const tc = all(tbl, 'tc').find(x => { const a = kid(x, 'cellAddr'); return a && +a.getAttribute('rowAddr') === rec.r && +a.getAttribute('colAddr') === rec.c; });
+      if (tc) setTcText(doc, tc, String(rec.v));
+    }
+    let out = new XMLSerializer().serializeToString(doc);
+    if (!out.startsWith('<?xml')) out = '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>' + out;
+    zip.file(names[si], out);
+  }
+  if (zip.file('mimetype')) zip.file('mimetype', await zip.file('mimetype').async('string'), { compression: 'STORE' });
+  return zip.generateAsync({ type: 'blob', compression: 'DEFLATE', mimeType: 'application/hwp+zip' });
+}
+
+/* =====================================================
+ *  공통 틀
+ * ===================================================== */
+let subs = [];
+const clearSubs = () => { subs.forEach(u => { try { u(); } catch (e) { } }); subs = []; };
+const sid = new URLSearchParams(location.search).get('s');
+let started = false;
+auth.onAuthStateChanged(u => {
+  if (sid) {
+    if (!u) { auth.signInAnonymously().catch(e => msgPage('접속 오류', '익명 로그인을 사용할 수 없습니다. 관리자에게 문의해 주세요.<br>' + esc(e.message))); return; }
+    if (!started) { started = true; participantMain(u); }
+  } else adminMain(u);
+});
+function msgPage(title, body) { clearSubs(); app.innerHTML = `<div class="card center"><h2>${title}</h2><p>${body}</p></div>`; }
+
+/* =====================================================
+ *  부서원 화면 (링크로 접속)
+ * ===================================================== */
+function askMe(prev) {
+  return new Promise(res => {
+    const m = document.createElement('div'); m.className = 'modal';
+    m.innerHTML = `<div class="box"><h2 style="margin:0 0 6px">입력자 정보</h2><p class="muted" style="margin:0 0 6px">입력한 칸마다 이 정보가 기록되어 파일 등록자가 확인할 수 있습니다.</p>
+      <label>이름</label><input id="mn" style="width:100%" value="${esc(prev && prev.name || '')}">
+      <label>부서</label><input id="md" style="width:100%" value="${esc(prev && prev.dept || '')}">
+      <div class="row" style="margin-top:14px;justify-content:flex-end"><button class="pri" id="mo">확인</button></div></div>`;
+    document.body.appendChild(m);
+    $('#mo').onclick = () => {
+      const name = $('#mn').value.trim(), dept = $('#md').value.trim();
+      if (!name) { toast('이름을 입력해 주세요.'); return; }
+      const me = { name, dept }; localStorage.setItem('fc_me', JSON.stringify(me)); m.remove(); res(me);
+    };
+  });
+}
+async function participantMain(u) {
+  app.innerHTML = '<div class="card center">불러오는 중…</div>';
+  const ref = db.collection('sheets').doc(sid);
+  let snap;
+  try { snap = await ref.get(); } catch (e) { return msgPage('열 수 없습니다', '링크가 올바르지 않거나 접근 권한이 없습니다.'); }
+  if (!snap.exists) return msgPage('열 수 없습니다', '존재하지 않거나 삭제된 링크입니다.');
+  let sheet = { id: sid, ...snap.data() };
+  if (isClosed(sheet)) return msgPage('마감되었습니다', '입력 기간이 끝난 링크입니다.');
+  if (sheet.pwHash && sessionStorage.getItem('pw_' + sid) !== sheet.pwHash) {
+    for (;;) {
+      const pw = prompt('비밀번호를 입력하세요.'); if (pw === null) return msgPage('비밀번호가 필요합니다', '새로고침 후 비밀번호를 입력해 주세요.');
+      const hsh = await sha(sid + pw);
+      if (hsh === sheet.pwHash) { sessionStorage.setItem('pw_' + sid, hsh); break; }
+      toast('비밀번호가 다릅니다.');
+    }
+  }
+  let me; try { me = JSON.parse(localStorage.getItem('fc_me')); } catch (e) { }
+  if (!me || !me.name) me = await askMe();
+  const touchPerson = () => ref.collection('people').doc(u.uid).set({ name: me.name, dept: me.dept, lastAt: TS() }, { merge: true }).catch(() => { });
+  touchPerson();
+  app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="chg">입력자 변경</button></div>
+    <div class="wrap"><div class="card"><div class="muted">점선 칸을 눌러 본인 항목을 입력하세요. 칸을 벗어나면(또는 Enter) 바로 저장됩니다. 다른 사람이 입력한 칸은 색으로 표시되고, 마우스를 올리면 입력자가 보입니다.${sheet.type === 'xlsx' ? ' (칸 안 줄바꿈: Shift+Enter)' : ''}</div></div>
+    <div id="vbox" class="card">서식을 불러오는 중…</div></div>`;
+  const showWho = () => $('#who').textContent = `입력자: ${me.name}${me.dept ? ' (' + me.dept + ')' : ''}`; showWho();
+  $('#chg').onclick = async () => { me = await askMe(me); showWho(); touchPerson(); };
+  let view;
+  try {
+    const bytes = await loadBytes(sid);
+    const r = await renderFile(sheet, bytes);
+    view = mountView($('#vbox'), r, {
+      editable: true,
+      onSave: async (td, v) => {
+        if (isClosed(sheet)) { toast('마감되어 저장할 수 없습니다.'); return false; }
+        const k = td.dataset.k, ex = view.cells[k];
+        if (ex && ex.v && ex.by !== u.uid && v !== ex.v && !confirm(`${ex.name}님이 입력한 칸입니다. 수정할까요?`)) return false;
+        const loc = JSON.parse(td.dataset.loc);
+        try {
+          await ref.collection('cells').doc(k).set({ ...loc, k, v, label: td.dataset.label, by: u.uid, name: me.name, dept: me.dept, at: TS() });
+          ref.collection('log').add({ k, label: td.dataset.label, prev: ex ? ex.v : '', v, by: u.uid, name: me.name, dept: me.dept, at: TS() }).catch(() => { });
+          touchPerson();
+        } catch (e) { toast('저장 실패: ' + (e.code === 'permission-denied' ? '마감되었거나 권한이 없습니다.' : e.message)); return false; }
+        return true;
+      }
+    });
+    subs.push(ref.collection('cells').onSnapshot(s => s.docChanges().forEach(ch => { if (ch.type !== 'removed') view.update(ch.doc.id, ch.doc.data({ serverTimestamps: 'estimate' })); })));
+    subs.push(ref.onSnapshot(s => { if (s.exists) sheet = { id: sid, ...s.data() }; }));
+  } catch (e) { $('#vbox').innerHTML = '서식을 불러오지 못했습니다: ' + esc(e.message); }
+}
+
+/* =====================================================
+ *  관리자 화면 (파일 등록자)
+ * ===================================================== */
+function adminBar(u) {
+  return `<div class="bar"><h1 style="cursor:pointer" id="home">링크 입력 취합</h1><span class="muted">${esc(u.email || '')}</span><button id="out">로그아웃</button></div>`;
+}
+function bindBar() { $('#home').onclick = () => adminMain(auth.currentUser); $('#out').onclick = () => auth.signOut(); }
+
+function adminMain(u) {
+  clearSubs();
+  if (!u || u.isAnonymous) {
+    app.innerHTML = `<div class="card center"><h2>링크 입력 취합</h2><p class="muted">엑셀·한글 파일을 올리고, 링크를 받은 부서원들이 각자 항목을 입력합니다.<br>파일을 등록하는 관리자는 구글 로그인이 필요합니다.<br>부서원은 받은 링크로 바로 입력하면 됩니다.</p><button class="pri" id="gl">Google로 로그인</button></div>`;
+    $('#gl').onclick = () => auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()).catch(e => toast('로그인 실패: ' + e.message));
+    return;
+  }
+  if (ADMIN_EMAIL_DOMAINS.length && !ADMIN_EMAIL_DOMAINS.some(d => (u.email || '').toLowerCase().endsWith('@' + d))) {
+    app.innerHTML = `<div class="card center"><h2>권한이 없습니다</h2><p>허용된 이메일 도메인이 아닙니다.</p><button id="o2">로그아웃</button></div>`;
+    $('#o2').onclick = () => auth.signOut(); return;
+  }
+  dashboard(u);
+}
+
+async function dashboard(u) {
+  u = u || auth.currentUser; clearSubs();
+  app.innerHTML = adminBar(u) + `<div class="wrap"><div class="card"><div class="row"><h2 style="margin:0;flex:1">내가 등록한 파일</h2><button class="pri" id="nw">+ 새 파일 등록</button></div><div id="lst" style="margin-top:10px">불러오는 중…</div></div></div>`;
+  bindBar(); $('#nw').onclick = () => newForm(u);
+  try {
+    const s = await db.collection('sheets').where('ownerUid', '==', u.uid).get();
+    const arr = s.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.createdAt ? b.createdAt.toMillis() : 9e15) - (a.createdAt ? a.createdAt.toMillis() : 9e15));
+    $('#lst').innerHTML = arr.length ? `<table class="list"><tr><th>제목</th><th>형식</th><th>등록</th><th>상태</th><th></th></tr>${arr.map(x => `<tr><td>${esc(x.title)}</td><td>${x.type}</td><td>${fmt(x.createdAt)}</td><td><span class="badge ${isClosed(x) ? 'no' : 'ok'}">${isClosed(x) ? '마감' : '입력 중'}</span></td><td><button data-o="${x.id}">열기</button> <button data-c="${x.id}">링크 복사</button></td></tr>`).join('')}</table>` : '<p class="muted">등록한 파일이 없습니다.</p>';
+    $('#lst').querySelectorAll('[data-o]').forEach(b => b.onclick = () => adminDetail(b.dataset.o));
+    $('#lst').querySelectorAll('[data-c]').forEach(b => b.onclick = () => copyLink(b.dataset.c));
+  } catch (e) { $('#lst').textContent = '목록을 불러오지 못했습니다: ' + e.message; }
+}
+function linkOf(id) { return location.origin + location.pathname + '?s=' + id; }
+function copyLink(id) { navigator.clipboard.writeText(linkOf(id)).then(() => toast('링크를 복사했습니다.'), () => prompt('링크를 복사하세요', linkOf(id))); }
+
+function newForm(u) {
+  app.innerHTML = adminBar(u) + `<div class="wrap"><div class="card" style="max-width:620px"><h2>새 파일 등록</h2>
+    <div class="warn"><b>개인정보·보안 사항이 들어 있는 파일은 올리지 마세요.</b><br>올린 파일은 Firebase에 저장되며, 링크를 가진 사람이 내용을 볼 수 있습니다.</div>
+    <label>제목</label><input id="nt" style="width:100%" placeholder="예: 2026년 하반기 부서별 현황">
+    <label>파일 (.xlsx 또는 .hwpx, 5MB 이하)</label><input type="file" id="nf" accept=".xlsx,.hwpx">
+    <div class="muted">.xls / .hwp 파일은 엑셀·한글에서 .xlsx / .hwpx로 다시 저장한 뒤 올려 주세요.</div>
+    <label><input type="checkbox" id="na"> 이미 내용이 있는 칸도 수정 가능하게 (기본: 빈 칸만 입력)</label>
+    <label>비밀번호 (선택)</label><input id="np" placeholder="없으면 비워 두세요">
+    <label>마감 일시 (선택)</label><input type="datetime-local" id="nd">
+    <div class="row" style="margin-top:16px"><button class="pri" id="ns">등록하고 링크 만들기</button><button id="nc">취소</button></div></div></div>`;
+  bindBar(); $('#nc').onclick = () => dashboard(u);
+  $('#ns').onclick = async () => {
+    const f = $('#nf').files[0], title = $('#nt').value.trim();
+    if (!f) return toast('파일을 선택해 주세요.');
+    const ext = (f.name.split('.').pop() || '').toLowerCase();
+    if (!['xlsx', 'hwpx'].includes(ext)) return toast('.xlsx 또는 .hwpx 파일만 올릴 수 있습니다.');
+    if (f.size > MAX_FILE) return toast('파일이 5MB를 넘습니다.');
+    const btn = $('#ns'); btn.disabled = true; btn.textContent = '등록 중…';
+    try {
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      const sheetData = { title: title || f.name.replace(/\.[^.]+$/, ''), type: ext, fileName: f.name, allowFilled: $('#na').checked, closed: false, ownerUid: u.uid, ownerName: u.displayName || u.email || '', createdAt: TS() };
+      const test = await renderFile(sheetData, bytes);
+      if (!test.panes.some(p => p.html.includes('class="ed"'))) { if (!confirm('입력 가능한 빈 칸을 찾지 못했습니다. 그래도 등록할까요?')) throw new Error('취소됨'); }
+      const ref = db.collection('sheets').doc();
+      const b64 = bytesToB64(bytes), n = Math.ceil(b64.length / CHUNK);
+      sheetData.chunkCount = n;
+      const pw = $('#np').value; if (pw) sheetData.pwHash = await sha(ref.id + pw);
+      if ($('#nd').value) sheetData.deadlineAt = firebase.firestore.Timestamp.fromDate(new Date($('#nd').value));
+      await ref.set(sheetData);
+      for (let i = 0; i < n; i++) await ref.collection('chunks').doc(String(i).padStart(4, '0')).set({ n: i, d: b64.slice(i * CHUNK, (i + 1) * CHUNK) });
+      toast('등록되었습니다.'); adminDetail(ref.id);
+    } catch (e) { toast('등록 실패: ' + e.message); btn.disabled = false; btn.textContent = '등록하고 링크 만들기'; }
+  };
+}
+
+async function adminDetail(id) {
+  clearSubs(); const u = auth.currentUser;
+  app.innerHTML = adminBar(u) + '<div class="wrap"><div class="card">불러오는 중…</div></div>'; bindBar();
+  const ref = db.collection('sheets').doc(id);
+  let snap; try { snap = await ref.get(); } catch (e) { toast('열 수 없습니다.'); return dashboard(u); }
+  if (!snap.exists) return dashboard(u);
+  let sheet = { id, ...snap.data() };
+  let view = null, people = {}, tab = 'res';
+  app.innerHTML = adminBar(u) + `<div class="wrap">
+    <div class="card"><div class="row"><h2 style="margin:0;flex:1" id="tt"></h2><button id="bk">← 목록</button></div>
+      <div class="row" style="margin-top:10px"><input id="lk" readonly style="flex:1;min-width:220px" value="${esc(linkOf(id))}"><button id="cp">링크 복사</button></div>
+      <div class="muted" style="margin-top:6px" id="meta"></div>
+      <div class="row" style="margin-top:10px"><button class="pri" id="dl">취합 파일 다운로드 (원본 서식)</button><button id="dp">입력자·이력 엑셀</button><button id="tg"></button><button class="dan" id="rm">삭제</button></div>
+      <div class="muted" style="margin-top:6px">다운로드 파일에는 입력자 정보가 섞이지 않습니다. 엑셀의 차트·그림 등 일부 요소는 변환 과정에서 빠질 수 있으니 중요한 서식은 확인해 주세요.</div></div>
+    <div class="card"><div class="tabs"><button data-t="res" class="on">입력 결과</button><button data-t="ppl">입력자</button><button data-t="log">이력</button></div>
+      <div id="p_res"><div class="row" style="margin-bottom:8px"><span>입력자별 보기</span><select id="fl"><option value="">전체</option></select><span class="muted" id="stat"></span></div><div id="vbox">서식을 불러오는 중…</div></div>
+      <div id="p_ppl" style="display:none"></div><div id="p_log" style="display:none"></div></div></div>`;
+  bindBar();
+  const paintHead = () => {
+    $('#tt').textContent = sheet.title;
+    $('#meta').textContent = `${sheet.fileName} · ${sheet.type} · ${isClosed(sheet) ? '마감' : '입력 중'}${sheet.deadlineAt ? ' · 마감 ' + fmt(sheet.deadlineAt) : ''}${sheet.pwHash ? ' · 비밀번호 있음' : ''}`;
+    $('#tg').textContent = sheet.closed ? '입력 다시 열기' : '입력 마감';
+  };
+  paintHead();
+  $('#bk').onclick = () => dashboard(u); $('#cp').onclick = () => copyLink(id);
+  $('#tg').onclick = async () => { await ref.update({ closed: !sheet.closed }); sheet.closed = !sheet.closed; paintHead(); };
+  const cellList = () => Object.values(view ? view.cells : {}).filter(r => r.v !== '');
+  const people_stats = () => {
+    const m = {};
+    for (const [uid, p] of Object.entries(people)) m[uid] = { uid, name: p.name, dept: p.dept, n: 0, last: p.lastAt };
+    for (const r of cellList()) { const x = m[r.by] || (m[r.by] = { uid: r.by, name: r.name, dept: r.dept, n: 0 }); x.n++; if (r.at && (!x.last || (r.at.toMillis ? r.at.toMillis() : 0) > (x.last.toMillis ? x.last.toMillis() : 0))) x.last = r.at; }
+    return Object.values(m).sort((a, b) => b.n - a.n);
+  };
+  const refresh = () => {
+    const ps = people_stats();
+    const cur = $('#fl').value;
+    $('#fl').innerHTML = '<option value="">전체</option>' + ps.map(p => `<option value="${esc(p.uid)}" ${p.uid === cur ? 'selected' : ''}>${esc(p.name)}${p.dept ? ' (' + esc(p.dept) + ')' : ''} · ${p.n}칸</option>`).join('');
+    $('#stat').textContent = view ? `입력된 칸 ${cellList().length} / 입력 가능한 칸 ${view.count} · 참여 ${ps.length}명` : '';
+    if (tab === 'ppl') $('#p_ppl').innerHTML = ps.length ? `<table class="list"><tr><th>이름</th><th>부서</th><th>입력한 칸</th><th>최근 입력</th><th></th></tr>${ps.map(p => `<tr><td><span class="legend"><span style="background:hsl(${hue(p.uid)} 75% 90%)">${esc(p.name)}</span></span></td><td>${esc(p.dept || '')}</td><td>${p.n}</td><td>${fmt(p.last)}</td><td><button data-u="${esc(p.uid)}">이 사람이 입력한 칸 보기</button></td></tr>`).join('')}</table>` : '<p class="muted">아직 참여한 사람이 없습니다.</p>';
+    if (tab === 'ppl') $('#p_ppl').querySelectorAll('[data-u]').forEach(b => b.onclick = () => { $('#fl').value = b.dataset.u; showTab('res'); view && view.setFilter(b.dataset.u); });
+  };
+  const loadLog = async () => {
+    $('#p_log').innerHTML = '불러오는 중…';
+    const s = await ref.collection('log').orderBy('at', 'desc').limit(300).get();
+    $('#p_log').innerHTML = s.empty ? '<p class="muted">입력 이력이 없습니다.</p>' : `<div class="muted" style="margin-bottom:6px">최근 300건</div><table class="list"><tr><th>일시</th><th>입력자</th><th>위치</th><th>이전 값</th><th>입력 값</th></tr>${s.docs.map(d => { const x = d.data({ serverTimestamps: 'estimate' }); return `<tr><td>${fmt(x.at)}</td><td>${esc(x.name)}${x.dept ? ' (' + esc(x.dept) + ')' : ''}</td><td>${esc(x.label)}</td><td>${esc(x.prev)}</td><td>${esc(x.v)}</td></tr>`; }).join('')}</table>`;
+  };
+  const showTab = t => {
+    tab = t;
+    document.querySelectorAll('[data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+    ['res', 'ppl', 'log'].forEach(x => $('#p_' + x).style.display = x === t ? '' : 'none');
+    if (t === 'log') loadLog(); else refresh();
+  };
+  document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => showTab(b.dataset.t));
+  $('#fl').onchange = () => view && view.setFilter($('#fl').value);
+
+  let bytes;
+  try {
+    bytes = await loadBytes(id);
+    const r = await renderFile(sheet, bytes);
+    view = mountView($('#vbox'), r, { editable: false });
+    subs.push(ref.collection('cells').onSnapshot(s => { s.docChanges().forEach(ch => { if (ch.type !== 'removed') view.update(ch.doc.id, ch.doc.data({ serverTimestamps: 'estimate' })); }); refresh(); }));
+    subs.push(ref.collection('people').onSnapshot(s => { people = {}; s.forEach(d => people[d.id] = d.data()); refresh(); }));
+    subs.push(ref.onSnapshot(s => { if (s.exists) { sheet = { id, ...s.data() }; paintHead(); } }));
+  } catch (e) { $('#vbox').textContent = '서식을 불러오지 못했습니다: ' + e.message; }
+
+  $('#dl').onclick = async () => {
+    if (!view) return; const b = $('#dl'); b.disabled = true;
+    try {
+      const list = cellList().concat(Object.values(view.cells).filter(r => r.v === ''));
+      const blob = sheet.type === 'xlsx' ? await buildXlsx(bytes, list) : await buildHwpx(bytes, list);
+      dlBlob(blob, sheet.fileName.replace(/\.[^.]+$/, '') + '_취합.' + sheet.type);
+    } catch (e) { toast('다운로드 실패: ' + e.message); }
+    b.disabled = false;
+  };
+  $('#dp').onclick = async () => {
+    try {
+      const wb = new ExcelJS.Workbook();
+      const w1 = wb.addWorksheet('입력자'); w1.columns = [{ header: '이름', width: 14 }, { header: '부서', width: 18 }, { header: '입력한 칸 수', width: 14 }, { header: '최근 입력', width: 20 }];
+      people_stats().forEach(p => w1.addRow([p.name, p.dept || '', p.n, p.last && p.last.toDate ? p.last.toDate().toLocaleString('ko-KR') : '']));
+      const w2 = wb.addWorksheet('입력이력'); w2.columns = [{ header: '일시', width: 20 }, { header: '이름', width: 12 }, { header: '부서', width: 16 }, { header: '위치', width: 22 }, { header: '이전 값', width: 24 }, { header: '입력 값', width: 24 }];
+      const s = await ref.collection('log').orderBy('at').limit(5000).get();
+      s.forEach(d => { const x = d.data({ serverTimestamps: 'estimate' }); w2.addRow([x.at && x.at.toDate ? x.at.toDate().toLocaleString('ko-KR') : '', x.name, x.dept || '', x.label, x.prev, x.v]); });
+      const w3 = wb.addWorksheet('칸별 현재값'); w3.columns = [{ header: '위치', width: 22 }, { header: '입력 값', width: 30 }, { header: '입력자', width: 12 }, { header: '부서', width: 16 }, { header: '입력 일시', width: 20 }];
+      cellList().forEach(r => w3.addRow([r.label, r.v, r.name, r.dept || '', r.at && r.at.toDate ? r.at.toDate().toLocaleString('ko-KR') : '']));
+      dlBlob(new Blob([await wb.xlsx.writeBuffer()], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), sheet.title + '_입력자정보.xlsx');
+    } catch (e) { toast('다운로드 실패: ' + e.message); }
+  };
+  $('#rm').onclick = async () => {
+    if (!confirm('이 파일과 입력된 모든 내용·이력을 삭제합니다. 되돌릴 수 없습니다. 삭제할까요?')) return;
+    try {
+      clearSubs();
+      for (const c of ['cells', 'log', 'people', 'chunks']) for (;;) { const s = await ref.collection(c).limit(400).get(); if (s.empty) break; const b = db.batch(); s.docs.forEach(d => b.delete(d.ref)); await b.commit(); }
+      await ref.delete(); toast('삭제했습니다.'); dashboard(u);
+    } catch (e) { toast('삭제 실패: ' + e.message); }
+  };
+}
+</script>
+</body>
+</html>
