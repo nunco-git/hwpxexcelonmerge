@@ -366,18 +366,37 @@ async function participantMain(u) {
   if (!me || !me.name) me = await askMe();
   const touchPerson = () => ref.collection('people').doc(u.uid).set({ name: me.name, dept: me.dept, lastAt: TS() }, { merge: true }).catch(() => { });
   touchPerson();
-  app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="chg">입력자 변경</button></div>
+  app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="mb">내 입력 목록</button><button id="chg">입력자 변경</button></div>
     <div class="wrap"><div class="card"><div class="muted">점선 칸을 눌러 본인 항목을 입력하세요. 칸을 벗어나면(또는 Enter) 바로 저장됩니다. 다른 사람이 입력한 칸은 색으로 표시되고, 마우스를 올리면 입력자가 보입니다.${sheet.type === 'xlsx' ? ' (칸 안 줄바꿈: Shift+Enter)' : ''}</div></div>
+    <div class="card" id="mine" style="display:none"></div>
     <div id="vbox" class="card">서식을 불러오는 중…</div></div>`;
   const showWho = () => $('#who').textContent = `입력자: ${me.name}${me.dept ? ' (' + me.dept + ')' : ''}`; showWho();
   $('#chg').onclick = async () => { me = await askMe(me); showWho(); touchPerson(); };
-  let view;
+  let view, saveFn, panelOpen = false;
+  const renderMine = () => {
+    const box = $('#mine'); if (!panelOpen || !view) return;
+    if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+    const mine = Object.values(view.cells).filter(r => r.by === u.uid && r.v !== '').sort((a, b) => String(a.label).localeCompare(String(b.label), 'ko', { numeric: true }));
+    box.innerHTML = `<h2>내 입력 목록 (${mine.length}건)</h2>` + (mine.length
+      ? `<table class="list"><tr><th>위치</th><th>입력 값</th><th></th></tr>${mine.map(r => `<tr><td>${esc(r.label)}</td><td><input data-v="${esc(r.k)}" value="${esc(r.v)}" style="width:100%"></td><td style="white-space:nowrap"><button data-s="${esc(r.k)}">수정</button> <button class="dan" data-d="${esc(r.k)}">삭제</button></td></tr>`).join('')}</table>`
+      : '<p class="muted">아직 입력한 내용이 없습니다.</p>');
+    const tdOf = k => $('#vbox').querySelector(`[data-k="${k}"]`);
+    box.querySelectorAll('[data-s]').forEach(b => b.onclick = async () => {
+      const k = b.dataset.s, inp = [...box.querySelectorAll('[data-v]')].find(i => i.dataset.v === k), td = tdOf(k);
+      if (td && inp) await saveFn(td, inp.value.replace(/\s+/g, ' ').trim());
+    });
+    box.querySelectorAll('[data-d]').forEach(b => b.onclick = async () => {
+      if (!confirm('이 칸의 입력 내용을 삭제할까요?')) return;
+      const td = tdOf(b.dataset.d); if (td) await saveFn(td, '');
+    });
+  };
+  $('#mb').onclick = () => { panelOpen = !panelOpen; $('#mine').style.display = panelOpen ? '' : 'none'; renderMine(); };
   try {
     const bytes = await loadBytes(sid);
     const r = await renderFile(sheet, bytes);
     view = mountView($('#vbox'), r, {
       editable: true,
-      onSave: async (td, v) => {
+      onSave: saveFn = async (td, v) => {
         if (isClosed(sheet)) { toast('마감되어 저장할 수 없습니다.'); return false; }
         const k = td.dataset.k, ex = view.cells[k];
         if (ex && ex.v && ex.by !== u.uid && v !== ex.v && !confirm(`${ex.name}님이 입력한 칸입니다. 수정할까요?`)) return false;
@@ -386,11 +405,15 @@ async function participantMain(u) {
           await ref.collection('cells').doc(k).set({ ...loc, k, v, label: td.dataset.label, by: u.uid, name: me.name, dept: me.dept, at: TS() });
           ref.collection('log').add({ k, label: td.dataset.label, prev: ex ? ex.v : '', v, by: u.uid, name: me.name, dept: me.dept, at: TS() }).catch(() => { });
           touchPerson();
-        } catch (e) { toast('저장 실패: ' + (e.code === 'permission-denied' ? '마감되었거나 권한이 없습니다.' : e.message)); return false; }
+          toast('저장되었습니다 ✓');
+        } catch (e) { console.error(e); toast('저장 실패 [' + (e.code || '') + ']: ' + (e.code === 'permission-denied' ? '권한이 없거나 마감되었습니다. (Firestore 규칙/익명 로그인 설정을 확인해 주세요)' : e.message)); return false; }
         return true;
       }
     });
-    subs.push(ref.collection('cells').onSnapshot(s => s.docChanges().forEach(ch => { if (ch.type !== 'removed') view.update(ch.doc.id, ch.doc.data({ serverTimestamps: 'estimate' })); })));
+    $('#vbox').insertAdjacentHTML('afterbegin', view.count
+      ? `<div class="muted" style="margin-bottom:6px">입력할 수 있는 칸: ${view.count}개 (점선으로 표시된 칸)</div>`
+      : '<div class="warn"><b>입력할 수 있는 빈 칸을 찾지 못했습니다.</b><br>서식의 입력 칸에 공백·기호 등이 이미 들어 있으면 빈 칸으로 인식되지 않습니다. 파일 등록자에게 "이미 내용이 있는 칸도 수정 가능" 옵션으로 다시 등록해 달라고 요청해 주세요.</div>');
+    subs.push(ref.collection('cells').onSnapshot(s => { s.docChanges().forEach(ch => { if (ch.type !== 'removed') view.update(ch.doc.id, ch.doc.data({ serverTimestamps: 'estimate' })); }); renderMine(); }, e => toast('입력 내용을 불러오지 못했습니다 [' + (e.code || '') + ']')));
     subs.push(ref.onSnapshot(s => { if (s.exists) sheet = { id: sid, ...s.data() }; }));
   } catch (e) { $('#vbox').innerHTML = '서식을 불러오지 못했습니다: ' + esc(e.message); }
 }
@@ -407,7 +430,19 @@ function adminMain(u) {
   clearSubs();
   if (!u || u.isAnonymous) {
     app.innerHTML = `<div class="card center"><h2>링크 입력 취합</h2><p class="muted">엑셀·한글 파일을 올리고, 링크를 받은 부서원들이 각자 항목을 입력합니다.<br>파일을 등록하는 관리자는 구글 로그인이 필요합니다.<br>부서원은 받은 링크로 바로 입력하면 됩니다.</p><button class="pri" id="gl">Google로 로그인</button></div>`;
-    $('#gl').onclick = () => auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()).catch(e => toast('로그인 실패: ' + e.message));
+    let busy = false;
+    $('#gl').onclick = async () => {
+      if (busy) return;
+      busy = true; const btn = $('#gl'); btn.disabled = true; btn.textContent = '로그인 창을 확인하세요…';
+      const prov = new firebase.auth.GoogleAuthProvider(); prov.setCustomParameters({ prompt: 'select_account' });
+      try { await auth.signInWithPopup(prov); }
+      catch (e) {
+        if (e.code === 'auth/popup-blocked') { toast('팝업이 차단되어 페이지 이동 방식으로 로그인합니다.'); try { await auth.signInWithRedirect(prov); return; } catch (e2) { toast('로그인 실패: ' + e2.message); } }
+        else if (e.code === 'auth/cancelled-popup-request' || e.code === 'auth/popup-closed-by-user') toast('로그인 창이 닫혔습니다. 버튼을 한 번만 누르고 열린 창에서 계정을 선택해 주세요.');
+        else toast('로그인 실패: ' + e.message);
+      }
+      busy = false; if ($('#gl')) { $('#gl').disabled = false; $('#gl').textContent = 'Google로 로그인'; }
+    };
     return;
   }
   if (ADMIN_EMAIL_DOMAINS.length && !ADMIN_EMAIL_DOMAINS.some(d => (u.email || '').toLowerCase().endsWith('@' + d))) {
@@ -424,10 +459,43 @@ async function dashboard(u) {
   try {
     const s = await db.collection('sheets').where('ownerUid', '==', u.uid).get();
     const arr = s.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.createdAt ? b.createdAt.toMillis() : 9e15) - (a.createdAt ? a.createdAt.toMillis() : 9e15));
-    $('#lst').innerHTML = arr.length ? `<table class="list"><tr><th>제목</th><th>형식</th><th>등록</th><th>상태</th><th></th></tr>${arr.map(x => `<tr><td>${esc(x.title)}</td><td>${x.type}</td><td>${fmt(x.createdAt)}</td><td><span class="badge ${isClosed(x) ? 'no' : 'ok'}">${isClosed(x) ? '마감' : '입력 중'}</span></td><td><button data-o="${x.id}">열기</button> <button data-c="${x.id}">링크 복사</button></td></tr>`).join('')}</table>` : '<p class="muted">등록한 파일이 없습니다.</p>';
+    $('#lst').innerHTML = arr.length ? `<table class="list"><tr><th>제목</th><th>형식</th><th>등록</th><th>상태</th><th></th></tr>${arr.map(x => `<tr><td>${esc(x.title)}</td><td>${x.type}</td><td>${fmt(x.createdAt)}</td><td><span class="badge ${isClosed(x) ? 'no' : 'ok'}">${isClosed(x) ? '마감' : '입력 중'}</span></td><td><button data-o="${x.id}">열기</button> <button data-c="${x.id}">링크 복사</button> <button data-e="${x.id}">수정</button> <button class="dan" data-x="${x.id}">삭제</button></td></tr>`).join('')}</table>` : '<p class="muted">등록한 파일이 없습니다.</p>';
     $('#lst').querySelectorAll('[data-o]').forEach(b => b.onclick = () => adminDetail(b.dataset.o));
     $('#lst').querySelectorAll('[data-c]').forEach(b => b.onclick = () => copyLink(b.dataset.c));
+    $('#lst').querySelectorAll('[data-e]').forEach(b => b.onclick = () => editModal(arr.find(x => x.id === b.dataset.e), () => dashboard(u)));
+    $('#lst').querySelectorAll('[data-x]').forEach(b => b.onclick = async () => { if (await deleteSheet(b.dataset.x)) dashboard(u); });
   } catch (e) { $('#lst').textContent = '목록을 불러오지 못했습니다: ' + e.message; }
+}
+async function deleteSheet(id, pre) {
+  if (!confirm('이 파일과 입력된 모든 내용·이력을 삭제합니다. 되돌릴 수 없습니다. 삭제할까요?')) return false;
+  try {
+    if (pre) pre();
+    const ref = db.collection('sheets').doc(id);
+    for (const c of ['cells', 'log', 'people', 'chunks']) for (;;) { const s = await ref.collection(c).limit(400).get(); if (s.empty) break; const b = db.batch(); s.docs.forEach(d => b.delete(d.ref)); await b.commit(); }
+    await ref.delete(); toast('삭제했습니다.'); return true;
+  } catch (e) { toast('삭제 실패: ' + e.message); return false; }
+}
+function editModal(sheet, onDone) {
+  const dl = sheet.deadlineAt ? new Date(sheet.deadlineAt.toDate().getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
+  const m = document.createElement('div'); m.className = 'modal';
+  m.innerHTML = `<div class="box"><h2 style="margin:0 0 6px">파일 정보 수정</h2>
+    <label>제목</label><input id="et" style="width:100%" value="${esc(sheet.title)}">
+    <label>마감 일시 (비우면 마감 없음)</label><input type="datetime-local" id="ed" value="${dl}">
+    <label><input type="checkbox" id="ea" ${sheet.allowFilled ? 'checked' : ''}> 이미 내용이 있는 칸도 수정 가능</label>
+    <label>비밀번호 ${sheet.pwHash ? '(설정됨)' : '(없음)'}</label><input id="ep" style="width:100%" placeholder="바꾸려면 새 비밀번호 입력, 그대로 두려면 비워 두세요">
+    ${sheet.pwHash ? '<label><input type="checkbox" id="er"> 비밀번호 삭제</label>' : ''}
+    <div class="muted" style="margin-top:6px">파일 내용 자체는 바꿀 수 없습니다. 서식을 바꾸려면 새로 등록해 주세요.</div>
+    <div class="row" style="margin-top:14px;justify-content:flex-end"><button id="ec">취소</button><button class="pri" id="es">저장</button></div></div>`;
+  document.body.appendChild(m);
+  $('#ec').onclick = () => m.remove();
+  $('#es').onclick = async () => {
+    const upd = { title: $('#et').value.trim() || sheet.title, allowFilled: $('#ea').checked };
+    upd.deadlineAt = $('#ed').value ? firebase.firestore.Timestamp.fromDate(new Date($('#ed').value)) : firebase.firestore.FieldValue.delete();
+    const pw = $('#ep').value;
+    if (pw) upd.pwHash = await sha(sheet.id + pw); else if ($('#er') && $('#er').checked) upd.pwHash = firebase.firestore.FieldValue.delete();
+    try { await db.collection('sheets').doc(sheet.id).update(upd); m.remove(); toast('수정했습니다.'); onDone && onDone(); }
+    catch (e) { toast('수정 실패: ' + e.message); }
+  };
 }
 function linkOf(id) { return location.origin + location.pathname + '?s=' + id; }
 function copyLink(id) { navigator.clipboard.writeText(linkOf(id)).then(() => toast('링크를 복사했습니다.'), () => prompt('링크를 복사하세요', linkOf(id))); }
@@ -479,7 +547,7 @@ async function adminDetail(id) {
     <div class="card"><div class="row"><h2 style="margin:0;flex:1" id="tt"></h2><button id="bk">← 목록</button></div>
       <div class="row" style="margin-top:10px"><input id="lk" readonly style="flex:1;min-width:220px" value="${esc(linkOf(id))}"><button id="cp">링크 복사</button></div>
       <div class="muted" style="margin-top:6px" id="meta"></div>
-      <div class="row" style="margin-top:10px"><button class="pri" id="dl">취합 파일 다운로드 (원본 서식)</button><button id="dp">입력자·이력 엑셀</button><button id="tg"></button><button class="dan" id="rm">삭제</button></div>
+      <div class="row" style="margin-top:10px"><button class="pri" id="dl">취합 파일 다운로드 (원본 서식)</button><button id="dp">입력자·이력 엑셀</button><button id="ei">정보 수정</button><button id="tg"></button><button class="dan" id="rm">삭제</button></div>
       <div class="muted" style="margin-top:6px">다운로드 파일에는 입력자 정보가 섞이지 않습니다. 엑셀의 차트·그림 등 일부 요소는 변환 과정에서 빠질 수 있으니 중요한 서식은 확인해 주세요.</div></div>
     <div class="card"><div class="tabs"><button data-t="res" class="on">입력 결과</button><button data-t="ppl">입력자</button><button data-t="log">이력</button></div>
       <div id="p_res"><div class="row" style="margin-bottom:8px"><span>입력자별 보기</span><select id="fl"><option value="">전체</option></select><span class="muted" id="stat"></span></div><div id="vbox">서식을 불러오는 중…</div></div>
@@ -554,14 +622,8 @@ async function adminDetail(id) {
       dlBlob(new Blob([await wb.xlsx.writeBuffer()], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), sheet.title + '_입력자정보.xlsx');
     } catch (e) { toast('다운로드 실패: ' + e.message); }
   };
-  $('#rm').onclick = async () => {
-    if (!confirm('이 파일과 입력된 모든 내용·이력을 삭제합니다. 되돌릴 수 없습니다. 삭제할까요?')) return;
-    try {
-      clearSubs();
-      for (const c of ['cells', 'log', 'people', 'chunks']) for (;;) { const s = await ref.collection(c).limit(400).get(); if (s.empty) break; const b = db.batch(); s.docs.forEach(d => b.delete(d.ref)); await b.commit(); }
-      await ref.delete(); toast('삭제했습니다.'); dashboard(u);
-    } catch (e) { toast('삭제 실패: ' + e.message); }
-  };
+  $('#ei').onclick = () => editModal(sheet, () => adminDetail(id));
+  $('#rm').onclick = async () => { if (await deleteSheet(id, clearSubs)) dashboard(u); };
 }
 </script>
 </body>
