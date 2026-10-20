@@ -45,6 +45,8 @@ td.ed select{width:100%;border:0;background:transparent}
 .modal .box{background:#fff;border-radius:12px;padding:20px;width:380px;max-width:100%}
 .center{max-width:460px;margin:60px auto;text-align:center}
 .legend span{display:inline-block;padding:2px 8px;border-radius:10px;margin:2px;font-size:12px}
+.fillh{position:absolute;width:9px;height:9px;background:#2563eb;border:1px solid #fff;cursor:crosshair;display:none;z-index:5;touch-action:none}
+.fillsel{outline:2px dashed #2563eb!important;outline-offset:-2px}
 </style>
 </head>
 <body>
@@ -57,6 +59,7 @@ td.ed select{width:100%;border:0;background:transparent}
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fast-formula-parser@1.0.19/build/parser.min.js"></script>
 <script>
 /* ================= 설정 (여기만 수정) =================
  * Firebase 콘솔 > 프로젝트 설정 > 내 앱(웹)의 firebaseConfig 값을 붙여 넣으세요.
@@ -142,6 +145,233 @@ function fmtNum(n, nf) {
   return (v < 0 && !useAbs ? '-' : '') + back(pre) + ip + (fp ? '.' + fp : '') + back(suf);
 }
 
+/* ---------- 수식 계산 (fast-formula-parser + 보완 함수) ---------- */
+function parseCfRange(t) { const m = /^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$/.exec(String(t).replace(/^.*!/, '')); if (!m) return null; const p1 = a1ToRC(m[1] + m[2]), p2 = m[3] ? a1ToRC(m[3] + m[4]) : p1; return { r1: Math.min(p1[0], p2[0]), c1: Math.min(p1[1], p2[1]), r2: Math.max(p1[0], p2[0]), c2: Math.max(p1[1], p2[1]) }; }
+function a1ToRC(a) { const m = /^([A-Z]+)(\d+)$/.exec(a); let c = 0; for (const ch of m[1]) c = c * 26 + ch.charCodeAt(0) - 64; return [+m[2], c]; }
+function critFn(c) {
+  if (typeof c === 'number') return v => typeof v === 'number' && v === c;
+  if (typeof c === 'boolean') return v => v === c;
+  c = c == null ? '' : String(c);
+  const m = /^(>=|<=|<>|>|<|=)?([\s\S]*)$/.exec(c), op = m[1] || '=', rhs = m[2];
+  const toN = v => typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v)) ? Number(v) : null);
+  const n = rhs.trim() !== '' && !isNaN(Number(rhs)) ? Number(rhs) : null;
+  if (n !== null) return v => { const x = toN(v); if (x === null) return op === '<>'; return op === '=' ? x === n : op === '<>' ? x !== n : op === '>' ? x > n : op === '<' ? x < n : op === '>=' ? x >= n : x <= n; };
+  const re = new RegExp('^' + rhs.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/~\*/g, '\u0003').replace(/~\?/g, '\u0004').replace(/\*/g, '[\\s\\S]*').replace(/\?/g, '[\\s\\S]').replace(/\u0003/g, '\\*').replace(/\u0004/g, '\\?') + '$', 'i');
+  return v => { const s = v == null ? '' : String(v); if (op === '=') return re.test(s); if (op === '<>') return !re.test(s); const a = s.toLowerCase(), b = rhs.toLowerCase(); return op === '>' ? a > b : op === '<' ? a < b : op === '>=' ? a >= b : a <= b; };
+}
+function buildFunctions(FP) {
+  const H = FP.FormulaHelpers, T = FP.Types, FE = FP.FormulaError;
+  const numsOf = p => { const a = []; H.flattenParams(p, T.NUMBER, true, v => { if (typeof v === 'number') a.push(v); }); return a; };
+  const anyOf = p => { const a = []; H.flattenParams(p, null, true, v => a.push(v)); return a; };
+  const flat = p => H.accept(p, T.ARRAY, undefined, true, true);
+  const blank = v => v === null || v === undefined || v === '';
+  const idxIfs = pairs => {
+    if (pairs.length < 2 || pairs.length % 2) throw FE.VALUE;
+    const rs = [], cs = [];
+    for (let i = 0; i < pairs.length; i += 2) { rs.push(flat(pairs[i])); cs.push(critFn(H.accept(pairs[i + 1]))); }
+    const idx = []; for (let k = 0; k < rs[0].length; k++) if (rs.every((r, j) => k < r.length && cs[j](r[k]))) idx.push(k);
+    return idx;
+  };
+  const sum = a => a.reduce((x, y) => x + y, 0);
+  return {
+    MAX: (...p) => { const a = numsOf(p); return a.length ? a.reduce((x, y) => y > x ? y : x) : 0; },
+    MIN: (...p) => { const a = numsOf(p); return a.length ? a.reduce((x, y) => y < x ? y : x) : 0; },
+    COUNTA: (...p) => anyOf(p).filter(v => !blank(v)).length,
+    COUNTBLANK: (...p) => anyOf(p).filter(blank).length,
+    LARGE: (r, k) => { const a = numsOf([r]).sort((x, y) => y - x); k = H.accept(k, T.NUMBER); if (k < 1 || k > a.length) throw FE.NUM; return a[k - 1]; },
+    SMALL: (r, k) => { const a = numsOf([r]).sort((x, y) => x - y); k = H.accept(k, T.NUMBER); if (k < 1 || k > a.length) throw FE.NUM; return a[k - 1]; },
+    'RANK': (num, ref, order) => { const n = H.accept(num, T.NUMBER), a = numsOf([ref]), asc = order !== undefined && H.accept(order, T.NUMBER) !== 0; if (!a.includes(n)) throw FE.NA; return 1 + a.filter(x => asc ? x < n : x > n).length; },
+    'RANK.EQ': (num, ref, order) => { const n = H.accept(num, T.NUMBER), a = numsOf([ref]), asc = order !== undefined && H.accept(order, T.NUMBER) !== 0; if (!a.includes(n)) throw FE.NA; return 1 + a.filter(x => asc ? x < n : x > n).length; },
+    SUBTOTAL: (fn, ...p) => {
+      const f = H.accept(fn, T.NUMBER) % 100, a = numsOf(p);
+      switch (f) {
+        case 1: if (!a.length) throw FE.DIV0; return sum(a) / a.length;
+        case 2: return a.length;
+        case 3: return anyOf(p).filter(v => !blank(v)).length;
+        case 4: return a.length ? Math.max.apply(null, a) : 0;
+        case 5: return a.length ? Math.min.apply(null, a) : 0;
+        case 6: return a.reduce((x, y) => x * y, 1);
+        case 9: return sum(a);
+        default: throw FE.VALUE;
+      }
+    },
+    MATCH: (v, rng, type) => {
+      const val = H.accept(v), a = flat(rng), t = type === undefined ? 1 : H.accept(type, T.NUMBER);
+      if (t === 0) { const f = critFn(typeof val === 'string' ? '=' + val : val); const i = a.findIndex(x => f(x)); if (i < 0) throw FE.NA; return i + 1; }
+      let best = -1;
+      for (let i = 0; i < a.length; i++) { const x = a[i]; if (blank(x) || typeof x !== typeof val) continue; if (t > 0 ? x <= val : x >= val) { if (t > 0) best = i; else { best = i; } } else if (t > 0) break; }
+      if (best < 0) throw FE.NA; return best + 1;
+    },
+    XLOOKUP: (v, look, ret, nf) => {
+      const val = H.accept(v), a = flat(look), b = flat(ret); const f = critFn(typeof val === 'string' ? '=' + val : val);
+      const i = a.findIndex(x => f(x)); if (i < 0) { if (nf !== undefined) return H.accept(nf); throw FE.NA; }
+      return b[i] === undefined ? null : b[i];
+    },
+    TEXTJOIN: (d, ie, ...p) => { const delim = H.accept(d, T.STRING), ign = H.accept(ie, T.BOOLEAN); let a = anyOf(p); if (ign) a = a.filter(x => !blank(x)); return a.map(x => x == null ? '' : x).join(delim); },
+    SUMIFS: (sr, ...pairs) => { const s = flat(sr); return sum(idxIfs(pairs).map(i => s[i]).filter(x => typeof x === 'number')); },
+    COUNTIFS: (...pairs) => idxIfs(pairs).length,
+    AVERAGEIFS: (sr, ...pairs) => { const s = flat(sr); const a = idxIfs(pairs).map(i => s[i]).filter(x => typeof x === 'number'); if (!a.length) throw FE.DIV0; return sum(a) / a.length; },
+    MAXIFS: (sr, ...pairs) => { const s = flat(sr); const a = idxIfs(pairs).map(i => s[i]).filter(x => typeof x === 'number'); return a.length ? Math.max.apply(null, a) : 0; },
+    MINIFS: (sr, ...pairs) => { const s = flat(sr); const a = idxIfs(pairs).map(i => s[i]).filter(x => typeof x === 'number'); return a.length ? Math.min.apply(null, a) : 0; },
+    UPPER: s => String(H.accept(s, T.STRING)).toUpperCase(),
+    VALUE: s => { const v = H.accept(s); if (typeof v === 'number') return v; let t = String(v).trim().replace(/[,₩$\s]/g, ''); const pc = /%$/.test(t); if (pc) t = t.slice(0, -1); if (t === '' || isNaN(Number(t))) throw FE.VALUE; return pc ? Number(t) / 100 : Number(t); },
+    SUBSTITUTE: (t, o, n, k) => { t = String(H.accept(t, T.STRING)); o = String(H.accept(o, T.STRING)); n = String(H.accept(n, T.STRING)); if (o === '') return t; if (k === undefined) return t.split(o).join(n); k = H.accept(k, T.NUMBER); let i = -1, cnt = 0; for (;;) { i = t.indexOf(o, i + 1); if (i < 0) return t; if (++cnt === k) return t.slice(0, i) + n + t.slice(i + o.length); } },
+    CHOOSE: (ctx, idx, ...vals) => { const i = H.accept(idx, T.NUMBER); if (i < 1 || i > vals.length) throw FE.VALUE; return H.accept(vals[Math.floor(i) - 1]); },
+    SWITCH: (e, ...rest) => { const x = H.accept(e); const same = (a, b) => a === b || (typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase()); for (let i = 0; i + 1 < rest.length; i += 2) if (same(H.accept(rest[i]), x)) return H.accept(rest[i + 1]); if (rest.length % 2 === 1) return H.accept(rest[rest.length - 1]); throw FE.NA; },
+    MEDIAN: (...p) => { const a = numsOf(p).sort((x, y) => x - y); if (!a.length) throw FE.NUM; const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; },
+    MODE: (...p) => modeOf(numsOf(p)),
+    'MODE.SNGL': (...p) => modeOf(numsOf(p)),
+    STDEV: (...p) => Math.sqrt(varOf(numsOf(p), true)),
+    'STDEV.S': (...p) => Math.sqrt(varOf(numsOf(p), true)),
+    'STDEV.P': (...p) => Math.sqrt(varOf(numsOf(p), false)),
+    STDEVP: (...p) => Math.sqrt(varOf(numsOf(p), false)),
+    VAR: (...p) => varOf(numsOf(p), true),
+    'VAR.S': (...p) => varOf(numsOf(p), true),
+    'VAR.P': (...p) => varOf(numsOf(p), false),
+    VARP: (...p) => varOf(numsOf(p), false),
+    PERCENTILE: (r, k) => pctOf(numsOf([r]), H.accept(k, T.NUMBER)),
+    'PERCENTILE.INC': (r, k) => pctOf(numsOf([r]), H.accept(k, T.NUMBER)),
+    QUARTILE: (r, q) => pctOf(numsOf([r]), H.accept(q, T.NUMBER) / 4),
+    'QUARTILE.INC': (r, q) => pctOf(numsOf([r]), H.accept(q, T.NUMBER) / 4),
+    ISODD: n => Math.floor(Math.abs(H.accept(n, T.NUMBER))) % 2 === 1,
+    LOOKUP: (v, lv, rv) => { const val = H.accept(v), a = flat(lv), b = rv === undefined ? a : flat(rv); let best = -1; for (let i = 0; i < a.length; i++) { const x = a[i]; if (blank(x) || typeof x !== typeof val) continue; if (x <= val) best = i; else break; } if (best < 0) throw FE.NA; return b[best] === undefined ? null : b[best]; }
+  };
+  function modeOf(a) { const m = new Map(); a.forEach(x => m.set(x, (m.get(x) || 0) + 1)); let best = null, bc = 1; m.forEach((c, x) => { if (c > bc) { bc = c; best = x; } }); if (best === null) throw FE.NA; return best; }
+  function varOf(a, samp) { const n = a.length; if (n < (samp ? 2 : 1)) throw FE.DIV0; const mu = sum(a) / n; return a.reduce((t, x) => t + (x - mu) * (x - mu), 0) / (samp ? n - 1 : n); }
+  function pctOf(a, k) { a = a.slice().sort((x, y) => x - y); if (!a.length || k < 0 || k > 1) throw FE.NUM; const pos = k * (a.length - 1), lo = Math.floor(pos), hi = Math.ceil(pos); return a[lo] + (a[hi] - a[lo]) * (pos - lo); }
+}
+function makeCalc(calc) {
+  const FP = window.FormulaParser; if (!FP || !calc || !calc.length) return null;
+  const names = calc.map(s => (s ? s.name : '').toLowerCase());
+  let ents = {}, cur = 0; const memo = new Map(), busy = new Set();
+  const norm = v => { while (Array.isArray(v)) v = v[0]; return v === undefined ? null : v; };
+  const compute = (si, r, c) => {
+    const id = si + ':' + r + ',' + c; if (memo.has(id)) return memo.get(id);
+    if (busy.has(id)) return { err: FP.FormulaError.REF };
+    const f = calc[si].fms[r + ',' + c]; busy.add(id); const prev = cur; cur = si; let res;
+    let v; try { v = parser.parse(f.f, { row: r, col: c, sheet: calc[si].name }); } catch (e) { v = e; }
+    if (v instanceof FP.FormulaError && v.error !== '#ERROR!') res = { err: v };
+    else if (v instanceof Error) res = { v: f.res === undefined ? null : f.res, fb: true };
+    else res = { v: norm(v) };
+    cur = prev; busy.delete(id); memo.set(id, res); return res;
+  };
+  const getVal = (si, r, c) => {
+    const S = calc[si]; if (!S) throw FP.FormulaError.REF; const key = r + ',' + c;
+    if (S.fms[key]) { const x = compute(si, r, c); if (x.err) throw x.err; return x.v === undefined ? null : x.v; }
+    const e = ents[si] && ents[si][key]; if (e !== undefined) return e;
+    const v = S.vals[key]; return v === undefined ? null : v;
+  };
+  const sheetIdx = ref => { if (!ref.sheet) return cur; const i = names.indexOf(String(ref.sheet).toLowerCase()); if (i < 0) throw FP.FormulaError.REF; return i; };
+  const parser = new FP({
+    functions: buildFunctions(FP),
+    onCell: ref => getVal(sheetIdx(ref), ref.row, ref.col),
+    onRange: ref => {
+      const si = sheetIdx(ref), S = calc[si], out = [];
+      const r2 = Math.min(ref.to.row, S.maxRow || ref.to.row), c2 = Math.min(ref.to.col, S.maxCol || ref.to.col);
+      for (let r = ref.from.row; r <= r2; r++) { const row = []; for (let c = ref.from.col; c <= c2; c++) row.push(getVal(si, r, c)); out.push(row); }
+      return out.length ? out : [[null]];
+    }
+  });
+  /* ---- 조건부 서식 ---- */
+  const letters = n => { let t = ''; while (n > 0) { const m = (n - 1) % 26; t = String.fromCharCode(65 + m) + t; n = Math.floor((n - 1) / 26); } return t; };
+  const shiftF = (f, dr, dc) => (dr === 0 && dc === 0) ? f : f.replace(/(\$?)([A-Z]{1,3})(\$?)(\d+)(?![\d(])/g, (m, d1, col, d2, row, off, str) => {
+    const pv = off > 0 ? str[off - 1] : ''; if (pv && /[A-Za-z0-9_.]/.test(pv)) return m;
+    let c = 0; for (const ch of col) c = c * 26 + ch.charCodeAt(0) - 64;
+    return d1 + letters(d1 ? c : Math.max(1, c + dc)) + d2 + (d2 ? row : Math.max(1, +row + dr));
+  });
+  const parseRange = t => { const m = /^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$/.exec(String(t).replace(/^.*!/, '')); if (!m) return null; const p1 = a1ToRC(m[1] + m[2]), p2 = m[3] ? a1ToRC(m[3] + m[4]) : p1; return { r1: Math.min(p1[0], p2[0]), c1: Math.min(p1[1], p2[1]), r2: Math.max(p1[0], p2[0]), c2: Math.max(p1[1], p2[1]) }; };
+  const ev = (si, f, r, c, dr, dc) => {
+    const prev = cur; cur = si;
+    try { const v = parser.parse(shiftF(String(f), dr, dc), { row: r, col: c, sheet: calc[si].name }); return v instanceof FP.FormulaError ? null : norm(v); }
+    catch (e) { return null; } finally { cur = prev; }
+  };
+  const cmpV = (a, b) => { if (typeof a === 'number' && typeof b === 'number') return a - b; if (typeof a === 'string' && typeof b === 'string') { a = a.toLowerCase(); b = b.toLowerCase(); return a < b ? -1 : a > b ? 1 : 0; } const rank = x => typeof x === 'number' ? 0 : typeof x === 'string' ? 1 : 2; return rank(a) - rank(b); };
+  const hex = a => a && a.argb ? '#' + String(a.argb).slice(-6) : null;
+  const toSt = st => { if (!st) return {}; const o = {}; const f = st.fill; const bg = f && (hex(f.bgColor) || hex(f.fgColor)); if (bg) o.bg = bg; if (st.font) { const col = hex(st.font.color); if (col) o.color = col; if (st.font.bold) o.bold = true; if (st.font.italic) o.italic = true; } return o; };
+  const pct = (a, k) => { a = a.slice().sort((x, y) => x - y); if (!a.length) return null; const pos = Math.min(1, Math.max(0, k)) * (a.length - 1), lo = Math.floor(pos), hi = Math.ceil(pos); return a[lo] + (a[hi] - a[lo]) * (pos - lo); };
+  const hexRGB = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const cfStyles = () => {
+    const out = new Map();
+    calc.forEach((S, si) => {
+      if (!S || !S.cf || !S.cf.length) return;
+      S.cf.forEach(cf => {
+        const ranges = String(cf.ref).split(/\s+/).map(parseRange).filter(Boolean); if (!ranges.length) return;
+        const first = ranges[0], cells = [];
+        ranges.forEach(g => { for (let r = g.r1; r <= g.r2; r++) for (let c = g.c1; c <= g.c2; c++) cells.push([r, c]); });
+        if (cells.length > 20000) return;
+        const vals = cells.map(([r, c]) => { try { return getVal(si, r, c); } catch (e) { return null; } });
+        const nums = vals.filter(v => typeof v === 'number');
+        const avg = nums.length ? nums.reduce((x, y) => x + y, 0) / nums.length : 0;
+        const sorted = nums.slice().sort((x, y) => x - y);
+        const cnt = new Map(); vals.forEach(v => { if (v !== null && v !== '') { const k = typeof v + ':' + String(v).toLowerCase(); cnt.set(k, (cnt.get(k) || 0) + 1); } });
+        const rules = cf.rules.slice().sort((x, y) => (x.priority || 0) - (y.priority || 0));
+        const scale = {};
+        const stops = rule => scale[rule.priority] || (scale[rule.priority] = (rule.cfvo || []).map(o => {
+          const t = o.type, n = Number(o.value);
+          if (t === 'min') return sorted[0]; if (t === 'max') return sorted[sorted.length - 1];
+          if (t === 'num') return n; if (t === 'percent') return sorted[0] + (sorted[sorted.length - 1] - sorted[0]) * n / 100;
+          if (t === 'percentile') return pct(sorted, n / 100); if (t === 'formula') return ev(si, o.value, first.r1, first.c1, 0, 0); return null;
+        }));
+        cells.forEach(([r, c], i) => {
+          const v = vals[i], key = si + ':' + r + ',' + c; let st = out.get(key) || null, stop = false;
+          for (const rule of rules) {
+            if (stop) break;
+            let hit = false, extra = null;
+            const f0 = rule.formulae && rule.formulae[0];
+            switch (rule.type) {
+              case 'cellIs': {
+                const a = ev(si, f0, r, c, 0, 0), b = rule.formulae[1] !== undefined ? ev(si, rule.formulae[1], r, c, 0, 0) : null;
+                const x = (v === null || v === '') ? 0 : v, d = cmpV(x, a), op = rule.operator;
+                hit = op === 'greaterThan' ? d > 0 : op === 'greaterThanOrEqual' ? d >= 0 : op === 'lessThan' ? d < 0 : op === 'lessThanOrEqual' ? d <= 0 : op === 'equal' ? d === 0 : op === 'notEqual' ? d !== 0 : op === 'between' ? (d >= 0 && cmpV(x, b) <= 0) : op === 'notBetween' ? (d < 0 || cmpV(x, b) > 0) : false; break;
+              }
+              case 'expression': case 'containsText': case 'notContainsText': case 'beginsWith': case 'endsWith': case 'containsBlanks': case 'notContainsBlanks': case 'containsErrors': case 'notContainsErrors': {
+                const x = ev(si, f0, r, c, r - first.r1, c - first.c1); hit = x === true || (typeof x === 'number' && x !== 0); break;
+              }
+              case 'top10': { if (typeof v !== 'number' || !sorted.length) break; const k = rule.percent ? Math.max(1, Math.floor(sorted.length * (rule.rank || 10) / 100)) : (rule.rank || 10); hit = rule.bottom ? v <= sorted[Math.min(k, sorted.length) - 1] : v >= sorted[Math.max(0, sorted.length - k)]; break; }
+              case 'aboveAverage': { if (typeof v !== 'number') break; const above = rule.aboveAverage !== false; hit = above ? (rule.equalAverage ? v >= avg : v > avg) : (rule.equalAverage ? v <= avg : v < avg); break; }
+              case 'duplicateValues': case 'uniqueValues': { if (v === null || v === '') break; const n = cnt.get(typeof v + ':' + String(v).toLowerCase()) || 0; hit = rule.type === 'duplicateValues' ? n > 1 : n === 1; break; }
+              case 'colorScale': {
+                if (typeof v !== 'number' || !rule.color || !rule.color.length) break;
+                const t = stops(rule), cols = rule.color.map(x => hex(x)); if (t.some(x => x === null || x === undefined) || cols.some(x => !x)) break;
+                let k = 0; if (v >= t[t.length - 1]) k = t.length - 2; else { while (k < t.length - 2 && v >= t[k + 1]) k++; }
+                const span = t[k + 1] - t[k], w = span === 0 ? 0 : Math.min(1, Math.max(0, (v - t[k]) / span)), a = hexRGB(cols[k]), b = hexRGB(cols[k + 1]);
+                extra = { bg: '#' + a.map((x, j) => Math.round(x + (b[j] - x) * w).toString(16).padStart(2, '0')).join('') }; hit = true; break;
+              }
+              default: break;
+            }
+            if (!hit) continue;
+            st = Object.assign({}, extra || toSt(rule.style), st || {});
+            if (rule.stopIfTrue) stop = true;
+          }
+          if (st) out.set(key, st);
+        });
+      });
+    });
+    return out;
+  };
+  return {
+    hasCF: calc.some(S => S && S.cf && S.cf.length),
+    cfStyles,
+    setEntries(cells) {
+      ents = {}; memo.clear();
+      for (const k in cells) {
+        const rec = cells[k]; if (rec.kind !== 'x') continue;
+        const [r, c] = a1ToRC(rec.addr); const n = rec.v === '' ? null : (toNum(rec.v) !== null ? toNum(rec.v) : rec.v);
+        (ents[rec.si] || (ents[rec.si] = {}))[r + ',' + c] = n;
+      }
+    },
+    value(si, r, c) { return compute(si, r, c); }
+  };
+}
+function fmtCalc(x, nf) {
+  if (x.err) return x.err.error || '#VALUE!';
+  const v = x.v;
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+  if (typeof v === 'number') { const ft = fmtNum(v, nf); return ft !== null ? ft : String(Number(v.toPrecision(15))); }
+  return String(v);
+}
+
 /* ---------- 엑셀 렌더링 ---------- */
 function xStyle(cell) {
   let s = ''; const f = cell.font || {};
@@ -159,8 +389,30 @@ function xStyle(cell) {
 }
 async function renderXlsx(bytes, sheet) {
   const wb = new ExcelJS.Workbook(); await wb.xlsx.load(bytes);
-  const panes = [];
+  const panes = [], calc = [];
   wb.worksheets.forEach((ws, si) => {
+    const S = { name: ws.name, vals: {}, fms: {}, maxRow: ws.rowCount || 1, maxCol: ws.columnCount || 1 }; calc[si] = S;
+    ws.eachRow({ includeEmpty: false }, (row, r) => row.eachCell({ includeEmpty: false }, (cell, c) => {
+      try {
+        if (cell.type === ExcelJS.ValueType.Merge) return;
+        const key = r + ',' + c;
+        if (cell.type === ExcelJS.ValueType.Formula) {
+          let res = cell.value && typeof cell.value === 'object' ? cell.value.result : undefined;
+          if (res instanceof Date) res = res.getTime() / 86400000 + 25569; else if (res && typeof res === 'object') res = null;
+          const f = cell.formula;
+          if (f) S.fms[key] = { f, res }; else S.vals[key] = res;
+          return;
+        }
+        let v = cell.value;
+        if (v instanceof Date) v = v.getTime() / 86400000 + 25569; else if (v && typeof v === 'object') v = cell.text;
+        S.vals[key] = v;
+      } catch (e) { }
+    }));
+    const cfSet = new Set();
+    try {
+      S.cf = (ws.conditionalFormattings || []).filter(x => x && x.ref && x.rules && x.rules.length).map(x => ({ ref: x.ref, rules: x.rules.map(q => ({ type: q.type, operator: q.operator, formulae: q.formulae, priority: q.priority || 0, stopIfTrue: q.stopIfTrue, style: q.style, cfvo: q.cfvo, color: q.color, rank: q.rank, percent: q.percent, bottom: q.bottom, aboveAverage: q.aboveAverage, equalAverage: q.equalAverage })) }));
+      S.cf.forEach(x => String(x.ref).split(/\s+/).forEach(t => { const g = parseCfRange(t); if (g && (g.r2 - g.r1 + 1) * (g.c2 - g.c1 + 1) <= 20000) for (let r = g.r1; r <= g.r2; r++) for (let c = g.c1; c <= g.c2; c++) cfSet.add(r + ',' + c); }));
+    } catch (e) { S.cf = []; }
     if (ws.state && ws.state !== 'visible') return;
     const merges = {}, covered = new Set();
     ((ws.model && ws.model.merges) || []).forEach(m => {
@@ -185,8 +437,11 @@ async function renderXlsx(bytes, sheet) {
         } catch (e) { }
         const isF = cell.type === ExcelJS.ValueType.Formula;
         const ed = !isF && (sheet.allowFilled || text === '');
-        const span = m ? ` colspan="${m.cs}" rowspan="${m.rs}"` : '';
-        if (!ed) { h += `<td class="lk"${span} style="${xStyle(cell)}">${esc(text)}</td>`; continue; }
+        const span = (m ? ` colspan="${m.cs}" rowspan="${m.rs}"` : '') + (cfSet.has(r + ',' + c) ? ` data-cf="${si}:${r},${c}"` : '');
+        if (!ed) {
+          const fm = isF && S.fms[r + ',' + c] ? ` fm" data-fs="${si}" data-fr="${r}" data-fc="${c}" data-fnf="${esc(cell.numFmt || '')}` : '';
+          h += `<td class="lk${fm}"${span} style="${xStyle(cell)}">${esc(text)}</td>`; continue;
+        }
         const loc = { kind: 'x', si, addr: cell.address };
         let inner = esc(text);
         const dv = cell.dataValidation;
@@ -202,7 +457,7 @@ async function renderXlsx(bytes, sheet) {
     h += '</table>';
     panes.push({ name: ws.name, html: h });
   });
-  return { panes };
+  return { panes, calc };
 }
 
 /* ---------- 한글(hwpx) 렌더링 ---------- */
@@ -246,6 +501,20 @@ async function renderHwpx(bytes) {
 const renderFile = (sheet, bytes) => sheet.type === 'xlsx' ? renderXlsx(bytes, sheet) : renderHwpx(bytes);
 
 /* ---------- 화면에 붙이기 (입력/조회 공용) ---------- */
+const cellV = td => String(td.innerText !== undefined ? td.innerText : td.textContent).replace(/\u00a0/g, ' ').replace(/\r/g, '').trim();
+function parseTSV(t) {
+  t = String(t).replace(/\r/g, ''); const rows = []; let row = [], cur = '', q = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (q) { if (ch === '"') { if (t[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+    else if (ch === '"' && cur === '') q = true;
+    else if (ch === '\t') { row.push(cur); cur = ''; }
+    else if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; }
+    else cur += ch;
+  }
+  if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+  return rows;
+}
 function mountView(box, r, opt) {
   const multi = r.panes.length > 1;
   box.innerHTML = (multi ? `<div class="tabs">${r.panes.map((p, i) => `<button data-tab="${i}" class="${i ? '' : 'on'}">${esc(p.name)}</button>`).join('')}</div>` : '') +
@@ -256,12 +525,19 @@ function mountView(box, r, opt) {
   });
   const tds = [...box.querySelectorAll('td.ed')];
   const byKey = new Map(tds.map(td => [td.dataset.k, td]));
+  box.querySelectorAll('td.ed, td[data-cf]').forEach(td => { td.dataset.obg = td.style.background || ''; td.dataset.ocol = td.style.color || ''; td.dataset.ofw = td.style.fontWeight || ''; td.dataset.ofs = td.style.fontStyle || ''; });
   tds.forEach(td => {
     const sel = td.querySelector('select');
     if (sel) sel.disabled = !opt.editable;
-    else if (opt.editable) { td.contentEditable = 'true'; td.spellcheck = false; }
+    else if (opt.editable) { try { td.contentEditable = 'plaintext-only'; if (td.contentEditable !== 'plaintext-only') td.contentEditable = 'true'; } catch (e) { td.contentEditable = 'true'; } td.spellcheck = false; }
+    try { const L = JSON.parse(td.dataset.loc); if (L.kind === 'x') { const p = a1ToRC(L.addr); td._p = { g: 'x' + L.si, r: p[0], c: p[1] }; } else td._p = { g: 'h' + L.sec + '_' + L.t, r: L.r, c: L.c }; } catch (e) { }
   });
+  const byPos = new Map(); tds.forEach(td => { if (td._p) byPos.set(td._p.g + '|' + td._p.r + '|' + td._p.c, td); });
   const view = { cells: {}, filter: null, count: tds.length };
+  const calc = r.calc ? makeCalc(r.calc) : null;
+  const fmTds = calc ? [...box.querySelectorAll('td.fm')] : [];
+  const cfTds = new Map(); if (calc && calc.hasCF) box.querySelectorAll('td[data-cf]').forEach(td => cfTds.set(td.dataset.cf, td));
+  let calcT = null;
   function paint(k) {
     const td = byKey.get(k), rec = view.cells[k]; if (!td || !rec) return;
     const sel = td.querySelector('select');
@@ -272,20 +548,137 @@ function mountView(box, r, opt) {
       td.textContent = ft !== null ? ft : rec.v;
     }
     if (rec.v) {
-      td.style.background = `hsl(${hue(rec.by)} 75% 90%)`;
+      if (!td.dataset.cfon) td.style.background = `hsl(${hue(rec.by)} 75% 90%)`;
+      td.style.boxShadow = `inset 3px 0 0 hsl(${hue(rec.by)} 70% 50%)`;
       td.title = `${rec.name}${rec.dept ? ' (' + rec.dept + ')' : ''} · ${fmt(rec.at)}`;
       td.style.opacity = (view.filter && rec.by !== view.filter) ? .25 : 1;
-    } else { td.style.background = ''; td.title = ''; td.style.opacity = 1; }
+    } else { if (!td.dataset.cfon) td.style.background = td.dataset.obg || ''; td.style.boxShadow = ''; td.title = ''; td.style.opacity = 1; }
   }
-  view.update = (k, rec) => { view.cells[k] = rec; paint(k); };
+  view.applyCF = () => {
+    if (!calc || !calc.hasCF) return;
+    let m; try { m = calc.cfStyles(); } catch (e) { console.error('조건부 서식 오류', e); return; }
+    cfTds.forEach((td, key) => {
+      const st = m.get(key);
+      if (st) { td.dataset.cfon = '1'; td.style.background = st.bg || td.dataset.obg || ''; td.style.color = st.color || td.dataset.ocol || ''; td.style.fontWeight = st.bold ? '700' : (td.dataset.ofw || ''); td.style.fontStyle = st.italic ? 'italic' : (td.dataset.ofs || ''); }
+      else if (td.dataset.cfon) {
+        delete td.dataset.cfon; td.style.background = td.dataset.obg || ''; td.style.color = td.dataset.ocol || ''; td.style.fontWeight = td.dataset.ofw || ''; td.style.fontStyle = td.dataset.ofs || '';
+        if (td.classList.contains('ed')) { const rec = view.cells[td.dataset.k]; if (rec && rec.v) paint(td.dataset.k); }
+      }
+    });
+  };
+  view.recalc = () => {
+    if (!calc) return;
+    try {
+      calc.setEntries(view.cells);
+      fmTds.forEach(td => {
+        const x = calc.value(+td.dataset.fs, +td.dataset.fr, +td.dataset.fc), nf = td.dataset.fnf || '';
+        if (x.fb || (nf && /[ymdhs]/i.test(nf.replace(/"[^"]*"|\[[^\]]*\]|\\./g, '')))) return;
+        td.textContent = fmtCalc(x, nf);
+      });
+      view.applyCF();
+    } catch (e) { console.error('수식 계산 오류', e); }
+  };
+  view.update = (k, rec) => { view.cells[k] = rec; paint(k); if (calc) { clearTimeout(calcT); calcT = setTimeout(view.recalc, 40); } };
   view.setFilter = u => { view.filter = u || null; for (const k in view.cells) paint(k); };
+  if (calc && calc.hasCF) { calc.setEntries({}); view.applyCF(); }
+
   if (opt.editable) {
-    box.addEventListener('focusin', e => { const td = e.target.closest && e.target.closest('td.ed'); if (td && !e.target.matches('select')) { const rec = view.cells[td.dataset.k]; if (td.dataset.nf && rec && rec.v !== '') td.textContent = rec.v; td.dataset.old = td.textContent; } });
+    /* --- 위치 이동 --- */
+    const DIR = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+    const selAll = td => { const sl = getSelection(); if (!sl || !sl.rangeCount) return false; const rg = sl.getRangeAt(0); return td.contains(rg.startContainer) && rg.toString().length >= (td.textContent || '').length; };
+    const atEdge = (td, key) => {
+      const txt = td.textContent || '';
+      if (key === 'ArrowUp' || key === 'ArrowDown') return !txt.includes('\n') || selAll(td);
+      const sl = getSelection(); if (!sl || !sl.rangeCount) return true;
+      const rg = sl.getRangeAt(0); if (!td.contains(rg.startContainer)) return true;
+      if (!rg.collapsed) return selAll(td);
+      const pre = document.createRange(); pre.selectNodeContents(td); pre.setEnd(rg.endContainer, rg.endOffset);
+      const pos = pre.toString().length; return key === 'ArrowLeft' ? pos === 0 : pos >= txt.length;
+    };
+    const neighbor = (td, dir) => {
+      const p = td._p; if (!p) return null; let best = null, bd = 1e9;
+      for (const t of tds) {
+        const q = t._p; if (!q || q.g !== p.g || t === td) continue;
+        let ok, d;
+        if (dir === 'down') { ok = q.c === p.c && q.r > p.r; d = q.r - p.r; }
+        else if (dir === 'up') { ok = q.c === p.c && q.r < p.r; d = p.r - q.r; }
+        else if (dir === 'right') { ok = q.r === p.r && q.c > p.c; d = q.c - p.c; }
+        else { ok = q.r === p.r && q.c < p.c; d = p.c - q.c; }
+        if (ok && d < bd) { bd = d; best = t; }
+      }
+      return best;
+    };
+    const goTo = (td, nx) => {
+      td.blur();
+      const sel = nx.querySelector('select');
+      (sel || nx).focus();
+      if (!sel) { try { const rg = document.createRange(); rg.selectNodeContents(nx); const sl = getSelection(); sl.removeAllRanges(); sl.addRange(rg); } catch (er) { } }
+      try { nx.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (er) { }
+    };
+
+    /* --- 여러 칸 붙여넣기 / 채우기 --- */
+    const pasteGrid = async (td, grid) => {
+      const p = td._p; if (!p) return;
+      const list = []; let skipped = 0;
+      grid.forEach((row, i) => row.forEach((val, j) => {
+        const t = byPos.get(p.g + '|' + (p.r + i) + '|' + (p.c + j));
+        if (t) { let v = String(val).replace(/\r/g, '').trim(); if (t.dataset.k[0] !== 'x') v = v.replace(/\n/g, ' '); list.push({ td: t, v }); } else skipped++;
+      }));
+      if (opt.onBulk) await opt.onBulk(list, skipped, '붙여넣기');
+    };
+    const fillTargets = (src, t) => {
+      const p = src._p, q = t._p; if (!p || !q || p.g !== q.g) return [];
+      const dr = q.r - p.r, dc = q.c - p.c, out = [];
+      if (Math.abs(dr) >= Math.abs(dc)) { const st = dr >= 0 ? 1 : -1; for (let rr = p.r + st; st > 0 ? rr <= q.r : rr >= q.r; rr += st) { const x = byPos.get(p.g + '|' + rr + '|' + p.c); if (x) out.push(x); } }
+      else { const st = dc >= 0 ? 1 : -1; for (let cc = p.c + st; st > 0 ? cc <= q.c : cc >= q.c; cc += st) { const x = byPos.get(p.g + '|' + p.r + '|' + cc); if (x) out.push(x); } }
+      return out;
+    };
+    const srcVal = src => { const sel = src.querySelector('select'); if (sel) return sel.value; return document.activeElement === src ? cellV(src) : (view.cells[src.dataset.k] ? view.cells[src.dataset.k].v : cellV(src)); };
+    const fillFrom = async (src, t, inc) => {
+      const targets = fillTargets(src, t); if (!targets.length) return;
+      const v0 = srcVal(src), n0 = toNum(v0), q = t._p, p = src._p;
+      const sign = (Math.abs(q.r - p.r) >= Math.abs(q.c - p.c) ? q.r - p.r : q.c - p.c) >= 0 ? 1 : -1;
+      const list = targets.map((x, i) => ({ td: x, v: (inc && n0 !== null) ? String(n0 + (i + 1) * sign) : v0 }));
+      if (opt.onBulk) await opt.onBulk(list, 0, '채우기');
+    };
+    view._t = { neighbor, pasteGrid, fillTargets, fillFrom, byPos, goTo, atEdge };
+
+    /* --- 채우기 핸들 --- */
+    let handle = null, active = null, drag = null;
+    const clearMarks = () => box.querySelectorAll('.fillsel').forEach(x => x.classList.remove('fillsel'));
+    const ensureHandle = pane => {
+      if (handle && handle.parentNode === pane) return handle;
+      if (handle) handle.remove();
+      handle = document.createElement('div'); handle.className = 'fillh'; handle.title = '끌어서 채우기 (Ctrl: 숫자 증가)';
+      pane.style.position = 'relative'; pane.appendChild(handle);
+      handle.addEventListener('mousedown', e => e.preventDefault());
+      handle.addEventListener('pointerdown', e => { if (!active) return; e.preventDefault(); try { handle.setPointerCapture(e.pointerId); } catch (er) { } drag = { src: active, tgt: null }; });
+      handle.addEventListener('pointermove', e => {
+        if (!drag) return;
+        const el = document.elementFromPoint(e.clientX, e.clientY), t = el && el.closest && el.closest('td.ed');
+        if (t && t._p && drag.src._p && t._p.g === drag.src._p.g) { drag.tgt = t; clearMarks(); fillTargets(drag.src, t).forEach(x => x.classList.add('fillsel')); }
+      });
+      const end = async e => { if (!drag) return; const d = drag; drag = null; clearMarks(); if (d.tgt && d.tgt !== d.src) await fillFrom(d.src, d.tgt, e.ctrlKey); };
+      handle.addEventListener('pointerup', end);
+      handle.addEventListener('pointercancel', () => { drag = null; clearMarks(); });
+      return handle;
+    };
+    const placeHandle = td => {
+      const pane = td.closest('.pane'); if (!pane) return;
+      const h = ensureHandle(pane), pr = pane.getBoundingClientRect(), tr = td.getBoundingClientRect();
+      h.style.left = (tr.right - pr.left + pane.scrollLeft - 5) + 'px'; h.style.top = (tr.bottom - pr.top + pane.scrollTop - 5) + 'px'; h.style.display = 'block'; active = td;
+    };
+
+    /* --- 이벤트 --- */
+    box.addEventListener('focusin', e => {
+      const td = e.target.closest && e.target.closest('td.ed');
+      if (td && !e.target.matches('select')) { const rec = view.cells[td.dataset.k]; if (td.dataset.nf && rec && rec.v !== '') td.textContent = rec.v; td.dataset.old = cellV(td); placeHandle(td); }
+    });
     box.addEventListener('focusout', async e => {
       const td = e.target.closest && e.target.closest('td.ed');
       if (!td || e.target.matches('select')) return;
-      const v = td.textContent.replace(/\u00a0/g, ' ').trim();
-      if (v === (td.dataset.old || '').trim()) { paint(td.dataset.k); return; }
+      const v = cellV(td);
+      if (v === (td.dataset.old || '')) { paint(td.dataset.k); return; }
       const ok = await opt.onSave(td, v);
       if (ok === false) td.textContent = td.dataset.old || '';
     });
@@ -296,11 +689,27 @@ function mountView(box, r, opt) {
     });
     box.addEventListener('keydown', e => {
       const td = e.target.closest && e.target.closest('td.ed');
-      if (td && e.key === 'Enter' && !e.target.matches('select')) { if (e.shiftKey && td.dataset.k[0] === 'x') return; e.preventDefault(); td.blur(); }
+      if (!td || e.target.matches('select')) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (e.altKey && td.dataset.k[0] === 'x') { if (!document.execCommand('insertLineBreak')) document.execCommand('insertText', false, '\n'); return; }
+        const eds = [...(td.closest('.pane') || box).querySelectorAll('td.ed')];
+        const nx = neighbor(td, e.shiftKey ? 'up' : 'down') || eds[eds.indexOf(td) + (e.shiftKey ? -1 : 1)];
+        if (nx) goTo(td, nx); else td.blur();
+      } else if (DIR[e.key] && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        if (!atEdge(td, e.key)) return;
+        const nx = neighbor(td, DIR[e.key]); if (nx) { e.preventDefault(); goTo(td, nx); }
+      }
     });
     box.addEventListener('paste', e => {
-      const td = e.target.closest && e.target.closest('td.ed'); if (!td) return;
-      e.preventDefault(); document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').replace(/\r?\n/g, ' '));
+      const td = e.target.closest && e.target.closest('td.ed'); if (!td || e.target.tagName === 'SELECT') return;
+      e.preventDefault();
+      const grid = parseTSV(e.clipboardData.getData('text/plain') || '');
+      if (grid.length <= 1 && (grid[0] || []).length <= 1) {
+        let t = (grid[0] && grid[0][0]) || ''; if (td.dataset.k[0] !== 'x') t = t.replace(/\n/g, ' ');
+        document.execCommand('insertText', false, t); return;
+      }
+      pasteGrid(td, grid);
     });
   }
   return view;
@@ -315,6 +724,7 @@ async function buildXlsx(bytes, cells) {
     const t = String(rec.v).trim(), num = toNum(t);
     ws.getCell(rec.addr).value = t === '' ? null : (num !== null ? num : rec.v);
   }
+  wb.calcProperties = Object.assign(wb.calcProperties || {}, { fullCalcOnLoad: true });
   const buf = await wb.xlsx.writeBuffer();
   return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
@@ -403,24 +813,46 @@ async function participantMain(u) {
   if (!me || !me.name) me = await askMe();
   const touchPerson = () => ref.collection('people').doc(u.uid).set({ name: me.name, dept: me.dept, lastAt: TS() }, { merge: true }).catch(() => { });
   touchPerson();
-  app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="mb">내 입력 목록</button><button id="chg">입력자 변경</button></div>
+  app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="undo" title="실행 취소 (Ctrl+Z)">↶ 실행 취소</button><button id="redo" title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button><button id="mb">내 입력 목록</button><button id="chg">입력자 변경</button></div>
     <div class="wrap"><div class="card"><div class="muted">점선 칸을 눌러 본인 항목을 입력하세요. 칸을 벗어나면(또는 Enter) 바로 저장됩니다. 다른 사람이 입력한 칸은 색으로 표시되고, 마우스를 올리면 입력자가 보입니다.${sheet.type === 'xlsx' ? ' (칸 안 줄바꿈: Shift+Enter)' : ''}</div></div>
     <div class="card" id="mine" style="display:none"></div>
     <div id="vbox" class="card">서식을 불러오는 중…</div></div>`;
   const showWho = () => $('#who').textContent = `입력자: ${me.name}${me.dept ? ' (' + me.dept + ')' : ''}`; showWho();
   $('#chg').onclick = async () => { me = await askMe(me); showWho(); touchPerson(); };
   let view, saveFn, panelOpen = false;
+  const hist = { u: [], r: [] };
+  const pushHist = g => { if (g && g.length) { hist.u.push(g); if (hist.u.length > 100) hist.u.shift(); hist.r.length = 0; } };
+  const runHist = async (from, to, name) => {
+    const g = from.pop(); if (!g) { toast(name + '할 내용이 없습니다.'); return; }
+    const back = []; let n = 0, skip = 0;
+    for (const ent of g.slice().reverse()) {
+      const td = $('#vbox').querySelector(`[data-k="${ent.k}"]`), cur = view.cells[ent.k], curV = cur ? cur.v : '';
+      if (!td || curV !== ent.next || (cur && curV && cur.by !== u.uid)) { skip++; continue; }
+      if (await saveFn(td, ent.prev, { quiet: true, force: true, hist: back }) !== false) n++;
+    }
+    if (back.length) to.push(back);
+    toast(n ? `${name}했습니다 (${n}칸)${skip ? ` · 다른 사람이 바꾼 ${skip}칸은 제외` : ''}` : (skip ? '다른 사람이 수정한 칸이라 ' + name + '할 수 없습니다.' : name + '할 내용이 없습니다.'));
+  };
+  const undo = () => runHist(hist.u, hist.r, '실행 취소'), redo = () => runHist(hist.r, hist.u, '다시 실행');
+  $('#undo').onclick = undo; $('#redo').onclick = redo;
+  document.addEventListener('keydown', e => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const k = String(e.key).toLowerCase(); if (k !== 'z' && k !== 'y') return;
+    const a = document.activeElement; if (a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT')) return;
+    const td = a && a.closest && a.closest('td.ed'); if (td && cellV(td) !== (td.dataset.old || '')) return;
+    e.preventDefault(); (k === 'y' || e.shiftKey) ? redo() : undo();
+  });
   const renderMine = () => {
     const box = $('#mine'); if (!panelOpen || !view) return;
-    if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+    if (box.contains(document.activeElement) && document.activeElement.tagName === 'TEXTAREA') return;
     const mine = Object.values(view.cells).filter(r => r.by === u.uid && r.v !== '').sort((a, b) => String(a.label).localeCompare(String(b.label), 'ko', { numeric: true }));
     box.innerHTML = `<h2>내 입력 목록 (${mine.length}건)</h2>` + (mine.length
-      ? `<table class="list"><tr><th>위치</th><th>입력 값</th><th></th></tr>${mine.map(r => `<tr><td>${esc(r.label)}</td><td><input data-v="${esc(r.k)}" value="${esc(r.v)}" style="width:100%"></td><td style="white-space:nowrap"><button data-s="${esc(r.k)}">수정</button> <button class="dan" data-d="${esc(r.k)}">삭제</button></td></tr>`).join('')}</table>`
+      ? `<table class="list"><tr><th>위치</th><th>입력 값</th><th></th></tr>${mine.map(r => `<tr><td>${esc(r.label)}</td><td><textarea data-v="${esc(r.k)}" rows="${Math.min(4, String(r.v).split('\n').length)}" style="width:100%;font:inherit;padding:6px;border:1px solid #cfd4da;border-radius:7px">${esc(r.v)}</textarea></td><td style="white-space:nowrap"><button data-s="${esc(r.k)}">수정</button> <button class="dan" data-d="${esc(r.k)}">삭제</button></td></tr>`).join('')}</table>`
       : '<p class="muted">아직 입력한 내용이 없습니다.</p>');
     const tdOf = k => $('#vbox').querySelector(`[data-k="${k}"]`);
     box.querySelectorAll('[data-s]').forEach(b => b.onclick = async () => {
       const k = b.dataset.s, inp = [...box.querySelectorAll('[data-v]')].find(i => i.dataset.v === k), td = tdOf(k);
-      if (td && inp) await saveFn(td, inp.value.replace(/\s+/g, ' ').trim());
+      if (td && inp) await saveFn(td, inp.value.replace(/\r/g, '').trim());
     });
     box.querySelectorAll('[data-d]').forEach(b => b.onclick = async () => {
       if (!confirm('이 칸의 입력 내용을 삭제할까요?')) return;
@@ -433,16 +865,28 @@ async function participantMain(u) {
     const r = await renderFile(sheet, bytes);
     view = mountView($('#vbox'), r, {
       editable: true,
-      onSave: saveFn = async (td, v) => {
+      onBulk: async (list, skipped, what) => {
+        list = list.filter(({ td, v }) => { const ex = view.cells[td.dataset.k]; return !(ex ? ex.v === v : v === ''); });
+        if (!list.length) { toast(skipped ? `입력할 수 있는 칸이 없습니다.` : '바뀐 내용이 없습니다.'); return; }
+        const others = list.filter(({ td, v }) => { const ex = view.cells[td.dataset.k]; return ex && ex.v && ex.by !== u.uid && ex.v !== v; });
+        if (others.length && !confirm(`다른 사람이 입력한 ${others.length}칸을 덮어씁니다. 계속할까요?`)) return;
+        const grp = []; let n = 0;
+        for (const { td, v } of list) if (await saveFn(td, v, { quiet: true, force: true, hist: grp }) !== false) n++;
+        pushHist(grp);
+        toast(`${n}칸에 ${what}했습니다${skipped ? ` (입력할 수 없는 ${skipped}칸 제외)` : ''}`);
+      },
+      onSave: saveFn = async (td, v, opts = {}) => {
         if (isClosed(sheet)) { toast('마감되어 저장할 수 없습니다.'); return false; }
         const k = td.dataset.k, ex = view.cells[k];
-        if (ex && ex.v && ex.by !== u.uid && v !== ex.v && !confirm(`${ex.name}님이 입력한 칸입니다. 수정할까요?`)) return false;
+        if (!opts.force && ex && ex.v && ex.by !== u.uid && v !== ex.v && !confirm(`${ex.name}님이 입력한 칸입니다. 수정할까요?`)) return false;
         const loc = JSON.parse(td.dataset.loc);
         try {
           await ref.collection('cells').doc(k).set({ ...loc, k, v, label: td.dataset.label, by: u.uid, name: me.name, dept: me.dept, at: TS() });
           ref.collection('log').add({ k, label: td.dataset.label, prev: ex ? ex.v : '', v, by: u.uid, name: me.name, dept: me.dept, at: TS() }).catch(() => { });
           touchPerson();
-          toast('저장되었습니다 ✓');
+          if (!opts.quiet) toast('저장되었습니다 ✓');
+          const ent = { k, prev: ex ? ex.v : '', next: v };
+          if (opts.hist) opts.hist.push(ent); else if (ent.prev !== ent.next) pushHist([ent]);
         } catch (e) { console.error(e); toast('저장 실패 [' + (e.code || '') + ']: ' + (e.code === 'permission-denied' ? '권한이 없거나 마감되었습니다. (Firestore 규칙/익명 로그인 설정을 확인해 주세요)' : e.message)); return false; }
         return true;
       }
