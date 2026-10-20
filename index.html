@@ -47,6 +47,13 @@ td.ed select{width:100%;border:0;background:transparent}
 .legend span{display:inline-block;padding:2px 8px;border-radius:10px;margin:2px;font-size:12px}
 .fillh{position:absolute;width:9px;height:9px;background:#2563eb;border:1px solid #fff;cursor:crosshair;display:none;z-index:5;touch-action:none}
 .fillsel{outline:2px dashed #2563eb!important;outline-offset:-2px}
+td.rh{width:30px;min-width:30px;background:#f3f4f6!important;border:1px solid #e4e4e4;text-align:center;padding:0!important;white-space:nowrap;vertical-align:middle}
+td.rh.nr{background:#ecfdf5!important}
+button.rb{border:0;background:transparent;color:#2563eb;padding:0 3px;border-radius:4px;font-size:13px;line-height:1.1;opacity:.45}
+button.rb.dan{color:#b91c1c}
+tr:hover button.rb,button.rb:focus{opacity:1}
+td[data-pres]{position:relative}
+td[data-pres]::before{content:attr(data-pres);position:absolute;top:0;right:0;font-size:10px;line-height:1.3;background:#fef3c7;color:#92400e;padding:0 4px;pointer-events:none;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -356,7 +363,7 @@ function makeCalc(calc) {
       ents = {}; memo.clear();
       for (const k in cells) {
         const rec = cells[k]; if (rec.kind !== 'x') continue;
-        const [r, c] = a1ToRC(rec.addr); const n = rec.v === '' ? null : (toNum(rec.v) !== null ? toNum(rec.v) : rec.v);
+        const S = calc[rec.si]; if (!S) continue; let p = S.kp && S.kp[rec.addr]; if (!p) { if (S.shifted || /@/.test(rec.addr)) continue; p = a1ToRC(rec.addr); } const [r, c] = p; const n = rec.v === '' ? null : (toNum(rec.v) !== null ? toNum(rec.v) : rec.v);
         (ents[rec.si] || (ents[rec.si] = {}))[r + ',' + c] = n;
       }
     },
@@ -387,11 +394,130 @@ function xStyle(cell) {
   for (const side of ['top', 'left', 'bottom', 'right']) s += b[side] && b[side].style ? `border-${side}:1px solid #555;` : `border-${side}:1px solid #e4e4e4;`;
   return s;
 }
-async function renderXlsx(bytes, sheet) {
+/* ---------- 행 추가 (엑셀) : 가상 행 모델 + 수식·병합·검증 이동 ---------- */
+const colLetter = c => { let s = ''; while (c > 0) { const m = (c - 1) % 26; s = String.fromCharCode(65 + m) + s; c = Math.floor((c - 1) / 26); } return s; };
+const REFRE = /(?<![\w.$!'])((?:'(?:[^']|'')+'|[A-Za-z_가-힣][\w.가-힣]*)!)?(\$?)([A-Z]{1,3})(\$?)(\d+)(?::(\$?)([A-Z]{1,3})(\$?)(\d+))?(?![\w(!])/g;
+/* 문자열 리터럴("…")은 건드리지 않고 참조만 변환. fn(sheetName|null, absRow?, r, isEnd) → 새 행 */
+function mapRefs(f, own, fn) {
+  return String(f).split(/("(?:[^"]|"")*")/).map((seg, i) => {
+    if (i % 2) return seg;
+    return seg.replace(REFRE, (m, sh, d1, c1, a1, r1, d2, c2, a2, r2) => {
+      const name = sh ? sh.slice(0, -1).replace(/^'|'$/g, '').replace(/''/g, "'") : own;
+      const n1 = fn(name, a1 === '$', +r1, false, !!c2);
+      if (n1 === null || n1 === undefined) return m;
+      let out = (sh || '') + d1 + c1 + a1 + n1;
+      if (c2) { const n2 = fn(name, a2 === '$', +r2, true, true); out += ':' + d2 + c2 + a2 + (n2 === null || n2 === undefined ? r2 : n2); }
+      return out;
+    });
+  }).join('');
+}
+/* 행 순서 계산: rows = [{id, after, root, src, ts}] (이 시트 것만) */
+function rowOrder(maxRow, rows) {
+  const ids = new Set(rows.map(d => d.id)), kids = {};
+  rows.forEach(d => { const a = (/^o\d+$/.test(d.after) || ids.has(d.after)) ? d.after : 'o' + d.root; (kids[a] = kids[a] || []).push(d); });
+  for (const k in kids) kids[k].sort((x, y) => (y.ts || 0) - (x.ts || 0) || (x.id < y.id ? 1 : -1));
+  const order = [], F = [], Fend = [], pos = {}, keyOf = [], meta = {};
+  const walk = key => (kids[key] || []).forEach(d => { order.push(d); meta[d.id] = d; walk(d.id); });
+  for (let r = 1; r <= maxRow; r++) {
+    order.push({ orig: r }); F[r] = order.length; walk('o' + r); Fend[r] = order.length;
+  }
+  order.forEach((d, i) => { if (d.orig) keyOf[i + 1] = d.orig; else { keyOf[i + 1] = d.id; pos[d.id] = i + 1; } });
+  return { order, F, Fend, pos, keyOf, meta, added: rows.length > 0 && Object.keys(pos).length > 0 };
+}
+/* 워크북에 행 삽입을 적용. 반환: ops[si] = rowOrder 결과(삽입 없는 시트는 undefined) */
+function applyRowOps(wb, rows) {
+  const ops = [], byName = {};
+  wb.worksheets.forEach((ws, si) => {
+    const mine = (rows || []).filter(d => d.si === si);
+    if (!mine.length) return;
+    const o = rowOrder(ws.rowCount || 1, mine);
+    if (o.added) { ops[si] = o; byName[ws.name] = o; }
+  });
+  if (!Object.keys(byName).length) return ops;
+  const mapFor = (sheetName, abs, r, isEnd) => { const o = byName[sheetName]; if (!o) return null; if (r >= o.F.length) return null; return isEnd ? o.Fend[r] : o.F[r]; };
+  /* A. 수식 수집 (이동 전 좌표) */
+  const fms = wb.worksheets.map(ws => { const list = []; ws.eachRow({ includeEmpty: false }, (row, r) => row.eachCell({ includeEmpty: false }, (cell, c) => {
+    try { if (cell.type === ExcelJS.ValueType.Formula && !(cell.value && cell.value.shareType === 'array')) { const f = cell.formula; if (f) list.push({ r, c, f, res: cell.value && typeof cell.value === 'object' ? cell.value.result : undefined }); } } catch (e) { }
+  })); return list; });
+  /* B. 병합·검증·조건부서식 보관 → 행 삽입 */
+  const keep = [];
+  wb.worksheets.forEach((ws, si) => {
+    const o = ops[si]; if (!o) return;
+    const merges = ((ws.model && ws.model.merges) || []).slice();
+    merges.forEach(m => { try { ws.unMergeCells(m); } catch (e) { } });
+    const dvOld = Object.assign({}, ws.dataValidations && ws.dataValidations.model || {});
+    const cf = (ws.conditionalFormattings || []).slice();
+    const hts = [], hid = []; for (let r = 1; r <= (ws.rowCount || 1); r++) { const rw = ws.getRow(r); hts[r] = rw.height; hid[r] = rw.hidden; }
+    keep[si] = { merges, dvOld, cf, hts, hid };
+    o.order.forEach((d, i) => { if (!d.orig) ws.spliceRows(i + 1, 0, []); });
+  });
+  /* C. 수식 다시 쓰기 (새 좌표 + 참조 이동) */
+  const newF = wb.worksheets.map(() => ({}));
+  wb.worksheets.forEach((ws, si) => {
+    const o = ops[si];
+    fms[si].forEach(x => {
+      const nf = mapRefs(x.f, ws.name, mapFor), nr = o ? o.F[x.r] : x.r;
+      if (nr === undefined) return;
+      newF[si][nr + ',' + x.c] = nf;
+      ws.getCell(nr, x.c).value = { formula: nf, result: x.res };
+    });
+  });
+  /* D. 병합·검증·조건부서식 복원 + 새 행 채우기 */
+  const shiftRel = (f, own, delta) => mapRefs(f, own, (name, abs, r) => abs ? r : Math.max(1, r + delta));
+  wb.worksheets.forEach((ws, si) => {
+    const o = ops[si]; if (!o) return;
+    const { merges, dvOld, cf, hts, hid } = keep[si];
+    for (let n = 1; n <= o.order.length; n++) { const d = o.order[n - 1], rw = ws.getRow(n), so = d.orig || d.src; rw.height = hts[so]; rw.hidden = d.orig ? !!hid[so] : false; }
+    const maxCol = ws.columnCount || 1;
+    /* 병합 */
+    merges.forEach(m => {
+      const [a, b] = m.split(':'), pa = a1ToRC(a), pb = b ? a1ToRC(b) : pa;
+      const r1 = o.F[pa[0]], r2 = o.F[pb[0]]; if (!r1 || !r2) return;
+      try { ws.mergeCells(r1, pa[1], r2, pb[1]); } catch (e) { }
+      if (pa[0] === pb[0]) o.order.forEach((d, i) => { if (!d.orig && d.src === pa[0]) { try { ws.mergeCells(i + 1, pa[1], i + 1, pb[1]); } catch (e) { } } });
+    });
+    /* 검증(목록) */
+    const dvNew = {};
+    Object.keys(dvOld).forEach(addr => { const dv = dvOld[addr]; if (!dv) return; const p = a1ToRC(addr), nr = o.F[p[0]]; if (nr) dvNew[colLetter(p[1]) + nr] = dv; });
+    /* 새 행 채우기 */
+    o.order.forEach((d, i) => {
+      if (d.orig) return; const n = i + 1, sr = o.F[d.src]; if (!sr) return;
+      for (let c = 1; c <= maxCol; c++) {
+        const sc = ws.getCell(sr, c), tc = ws.getCell(n, c);
+        try { if (sc.style && Object.keys(sc.style).length) tc.style = JSON.parse(JSON.stringify(sc.style)); } catch (e) { }
+        const sf = newF[si][sr + ',' + c];
+        if (sf) { const nf = shiftRel(sf, ws.name, n - sr); newF[si][n + ',' + c] = nf; tc.value = { formula: nf }; }
+        const dv = dvNew[colLetter(c) + sr]; if (dv) dvNew[colLetter(c) + n] = dv;
+      }
+    });
+    if (ws.dataValidations) ws.dataValidations.model = dvNew;
+    /* 조건부 서식 */
+    cf.forEach(x => {
+      try {
+        x.ref = String(x.ref).split(/\s+/).map(t => {
+          const m = /^(\$?)([A-Z]+)(\$?)(\d+)(?::(\$?)([A-Z]+)(\$?)(\d+))?$/.exec(t); if (!m) return t;
+          const a = o.F[+m[4]]; if (!a) return t;
+          return m[1] + m[2] + m[3] + a + (m[6] ? ':' + m[5] + m[6] + m[7] + (o.Fend[+m[8]] || m[8]) : '');
+        }).join(' ');
+        (x.rules || []).forEach(q => { if (q.formulae) q.formulae = q.formulae.map(f => typeof f === 'string' ? mapRefs(f, ws.name, mapFor) : f); });
+      } catch (e) { }
+    });
+  });
+  return ops;
+}
+/* 셀 키 주소 ↔ 표시 주소. 키: 원래 주소("B12") 또는 추가 행("B@행ID") */
+function keyToAddr(addr, op) {
+  const m = /^([A-Z]+)(?:(\d+)|@(.+))$/.exec(addr); if (!m) return null;
+  if (m[3]) { const r = op && op.pos[m[3]]; return r ? m[1] + r : null; }
+  return m[1] + (op ? (op.F[+m[2]] || +m[2]) : +m[2]);
+}
+async function renderXlsx(bytes, sheet, ro) {
   const wb = new ExcelJS.Workbook(); await wb.xlsx.load(bytes);
+  const ops = applyRowOps(wb, (ro && ro.rows) || []), gut = !!(ro && ro.gutter);
   const panes = [], calc = [];
   wb.worksheets.forEach((ws, si) => {
-    const S = { name: ws.name, vals: {}, fms: {}, maxRow: ws.rowCount || 1, maxCol: ws.columnCount || 1 }; calc[si] = S;
+    const S = { name: ws.name, vals: {}, fms: {}, maxRow: ws.rowCount || 1, maxCol: ws.columnCount || 1, kp: {}, shifted: !!ops[si] }; calc[si] = S;
+    const op = ops[si];
     ws.eachRow({ includeEmpty: false }, (row, r) => row.eachCell({ includeEmpty: false }, (cell, c) => {
       try {
         if (cell.type === ExcelJS.ValueType.Merge) return;
@@ -421,12 +547,13 @@ async function renderXlsx(bytes, sheet) {
       for (let r = ca.row; r <= cb.row; r++) for (let c = ca.col; c <= cb.col; c++) if (r !== ca.row || c !== ca.col) covered.add(r + ',' + c);
     });
     const R = Math.min(ws.rowCount || 1, 500), C = Math.min(ws.columnCount || 1, 60);
-    let cols = '';
+    let cols = gut ? '<col style="width:30px">' : '';
     for (let c = 1; c <= C; c++) { const col = ws.getColumn(c); if (col.hidden) continue; cols += `<col style="width:${Math.round((col.width || 8.43) * 7 + 5)}px">`; }
     let h = `<table class="xt"><colgroup>${cols}</colgroup>`;
     for (let r = 1; r <= R; r++) {
       const row = ws.getRow(r); if (row.hidden) continue;
-      h += `<tr style="height:${row.height ? Math.round(row.height * 1.33) : 20}px">`;
+      const trs = `<tr style="height:${row.height ? Math.round(row.height * 1.33) : 20}px">`, kr = (op && op.keyOf[r]) || r;
+      let rh = '', rowEd = false;
       for (let c = 1; c <= C; c++) {
         if (ws.getColumn(c).hidden || covered.has(r + ',' + c)) continue;
         const cell = ws.getCell(r, c); const m = merges[cell.address];
@@ -440,9 +567,10 @@ async function renderXlsx(bytes, sheet) {
         const span = (m ? ` colspan="${m.cs}" rowspan="${m.rs}"` : '') + (cfSet.has(r + ',' + c) ? ` data-cf="${si}:${r},${c}"` : '');
         if (!ed) {
           const fm = isF && S.fms[r + ',' + c] ? ` fm" data-fs="${si}" data-fr="${r}" data-fc="${c}" data-fnf="${esc(cell.numFmt || '')}` : '';
-          h += `<td class="lk${fm}"${span} style="${xStyle(cell)}">${esc(text)}</td>`; continue;
+          rh += `<td class="lk${fm}"${span} style="${xStyle(cell)}">${esc(text)}</td>`; continue;
         }
-        const loc = { kind: 'x', si, addr: cell.address };
+        const kaddr = ws.getColumn(c).letter + (typeof kr === 'string' ? '@' + kr : kr); S.kp[kaddr] = [r, c]; rowEd = true;
+        const loc = { kind: 'x', si, addr: kaddr, pr: r, pc: c };
         let inner = esc(text);
         const dv = cell.dataValidation;
         if (dv && dv.type === 'list' && dv.formulae && /^"/.test(dv.formulae[0] || '')) {
@@ -450,9 +578,14 @@ async function renderXlsx(bytes, sheet) {
           inner = `<select><option value=""></option>${opts.map(o => `<option>${esc(o)}</option>`).join('')}</select>`;
         }
         const nfAttr = (cell.numFmt && fmtNum(1234.5, cell.numFmt) !== null) ? ` data-nf="${esc(cell.numFmt)}"` : '';
-        h += `<td class="ed"${span}${nfAttr} style="${xStyle(cell)}" data-k="x_${si}_${cell.address}" data-loc="${esc(JSON.stringify(loc))}" data-label="${esc(ws.name + ' ' + cell.address)}">${inner}</td>`;
+        rh += `<td class="ed"${span}${nfAttr} style="${xStyle(cell)}" data-k="x_${si}_${kaddr}" data-loc="${esc(JSON.stringify(loc))}" data-label="${esc(ws.name + ' ' + cell.address)}">${inner}</td>`;
       }
-      h += '</tr>';
+      let gh = '';
+      if (gut) {
+        const meta = typeof kr === 'string' && op ? op.meta[kr] : null, mine = meta && ro.uid && meta.by === ro.uid;
+        gh = `<td class="rh${meta ? ' nr' : ''}" data-si="${si}" data-rk="${esc(meta ? kr : 'o' + kr)}" data-src="${meta ? meta.src : kr}" data-root="${meta ? meta.root : kr}"${meta ? ` title="${esc((meta.name || '') + '님이 추가한 행')}"` : ''}>${rowEd ? '<button class="rb" data-act="add" title="이 행 아래에 같은 서식의 행 추가">＋</button>' : ''}${mine ? '<button class="rb dan" data-act="del" title="내가 추가한 행 삭제">×</button>' : ''}</td>`;
+      }
+      h += trs + gh + rh + '</tr>';
     }
     h += '</table>';
     panes.push({ name: ws.name, html: h });
@@ -498,7 +631,7 @@ async function renderHwpx(bytes) {
   }
   return { panes: [{ name: '문서', html }] };
 }
-const renderFile = (sheet, bytes) => sheet.type === 'xlsx' ? renderXlsx(bytes, sheet) : renderHwpx(bytes);
+const renderFile = (sheet, bytes, ro) => sheet.type === 'xlsx' ? renderXlsx(bytes, sheet, ro) : renderHwpx(bytes);
 
 /* ---------- 화면에 붙이기 (입력/조회 공용) ---------- */
 const cellV = td => String(td.innerText !== undefined ? td.innerText : td.textContent).replace(/\u00a0/g, ' ').replace(/\r/g, '').trim();
@@ -530,7 +663,7 @@ function mountView(box, r, opt) {
     const sel = td.querySelector('select');
     if (sel) sel.disabled = !opt.editable;
     else if (opt.editable) { try { td.contentEditable = 'plaintext-only'; if (td.contentEditable !== 'plaintext-only') td.contentEditable = 'true'; } catch (e) { td.contentEditable = 'true'; } td.spellcheck = false; }
-    try { const L = JSON.parse(td.dataset.loc); if (L.kind === 'x') { const p = a1ToRC(L.addr); td._p = { g: 'x' + L.si, r: p[0], c: p[1] }; } else td._p = { g: 'h' + L.sec + '_' + L.t, r: L.r, c: L.c }; } catch (e) { }
+    try { const L = JSON.parse(td.dataset.loc); if (L.kind === 'x') { const p = L.pr ? [L.pr, L.pc] : a1ToRC(L.addr); td._p = { g: 'x' + L.si, r: p[0], c: p[1] }; } else td._p = { g: 'h' + L.sec + '_' + L.t, r: L.r, c: L.c }; } catch (e) { }
   });
   const byPos = new Map(); tds.forEach(td => { if (td._p) byPos.set(td._p.g + '|' + td._p.r + '|' + td._p.c, td); });
   const view = { cells: {}, filter: null, count: tds.length };
@@ -673,9 +806,11 @@ function mountView(box, r, opt) {
     box.addEventListener('focusin', e => {
       const td = e.target.closest && e.target.closest('td.ed');
       if (td && !e.target.matches('select')) { const rec = view.cells[td.dataset.k]; if (td.dataset.nf && rec && rec.v !== '') td.textContent = rec.v; td.dataset.old = cellV(td); placeHandle(td); }
+      if (td && opt.onFocusCell) opt.onFocusCell(td);
     });
     box.addEventListener('focusout', async e => {
       const td = e.target.closest && e.target.closest('td.ed');
+      if (td && opt.onBlurCell) opt.onBlurCell(td);
       if (!td || e.target.matches('select')) return;
       const v = cellV(td);
       if (v === (td.dataset.old || '')) { paint(td.dataset.k); return; }
@@ -716,13 +851,15 @@ function mountView(box, r, opt) {
 }
 
 /* ---------- 취합 결과를 원본 서식에 반영해 파일 만들기 ---------- */
-async function buildXlsx(bytes, cells) {
+async function buildXlsx(bytes, cells, rows) {
   const wb = new ExcelJS.Workbook(); await wb.xlsx.load(bytes);
+  const ops = applyRowOps(wb, rows || []);
   for (const rec of cells) {
     if (rec.kind !== 'x') continue;
     const ws = wb.worksheets[rec.si]; if (!ws) continue;
+    const addr = keyToAddr(rec.addr, ops[rec.si]); if (!addr) continue;
     const t = String(rec.v).trim(), num = toNum(t);
-    ws.getCell(rec.addr).value = t === '' ? null : (num !== null ? num : rec.v);
+    ws.getCell(addr).value = t === '' ? null : (num !== null ? num : rec.v);
   }
   wb.calcProperties = Object.assign(wb.calcProperties || {}, { fullCalcOnLoad: true });
   const buf = await wb.xlsx.writeBuffer();
@@ -814,7 +951,7 @@ async function participantMain(u) {
   const touchPerson = () => ref.collection('people').doc(u.uid).set({ name: me.name, dept: me.dept, lastAt: TS() }, { merge: true }).catch(() => { });
   touchPerson();
   app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="undo" title="실행 취소 (Ctrl+Z)">↶ 실행 취소</button><button id="redo" title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button><button id="mb">내 입력 목록</button><button id="chg">입력자 변경</button></div>
-    <div class="wrap"><div class="card"><div class="muted">점선 칸을 눌러 본인 항목을 입력하세요. 칸을 벗어나면(또는 Enter) 바로 저장됩니다. 다른 사람이 입력한 칸은 색으로 표시되고, 마우스를 올리면 입력자가 보입니다.${sheet.type === 'xlsx' ? ' (칸 안 줄바꿈: Shift+Enter)' : ''}</div></div>
+    <div class="wrap"><div class="card"><div class="muted">점선 칸을 눌러 본인 항목을 입력하세요. 칸을 벗어나면(또는 Enter) 바로 저장됩니다. 다른 사람이 입력한 칸은 색으로 표시되고, 마우스를 올리면 입력자가 보입니다.${sheet.type === 'xlsx' ? ' (칸 안 줄바꿈: Shift+Enter)' : ''}${sheet.type === 'xlsx' && sheet.allowAddRows ? ' 행 왼쪽의 ＋ 버튼을 누르면 그 아래에 같은 서식의 행이 추가됩니다.' : ''}</div></div>
     <div class="card" id="mine" style="display:none"></div>
     <div id="vbox" class="card">서식을 불러오는 중…</div></div>`;
   const showWho = () => $('#who').textContent = `입력자: ${me.name}${me.dept ? ' (' + me.dept + ')' : ''}`; showWho();
@@ -860,11 +997,25 @@ async function participantMain(u) {
     });
   };
   $('#mb').onclick = () => { panelOpen = !panelOpen; $('#mine').style.display = panelOpen ? '' : 'none'; renderMine(); };
-  try {
-    const bytes = await loadBytes(sid);
-    const r = await renderFile(sheet, bytes);
-    view = mountView($('#vbox'), r, {
+  let allRows = [], allCells = {}, rowSig = null, rowsReady = false, dirty = false, building = false, pendingFocus = null;
+  let presMine = null, presT = null, presBeat = null, presDocs = {};
+  const presRef = ref.collection('presence').doc(u.uid);
+  const presSet = k => presRef.set({ k, name: me.name, dept: me.dept, ms: Date.now(), at: TS() }).catch(() => { });
+  const applyPresence = () => {
+    const vb = $('#vbox'); if (!vb) return;
+    vb.querySelectorAll('td[data-pres]').forEach(t => { t.removeAttribute('data-pres'); t.style.outline = ''; });
+    const now = Date.now();
+    for (const [uid, p] of Object.entries(presDocs)) {
+      if (uid === u.uid || !p.k || now - (p.ms || 0) > 40000) continue;
+      const t = vb.querySelector('td.ed[data-k="' + p.k + '"]'); if (!t) continue;
+      t.dataset.pres = (p.name || '') + ' 입력 중'; t.style.outline = '2px solid hsl(' + hue(uid) + ' 70% 45%)';
+    }
+  };
+  setInterval(applyPresence, 5000);
+  const opt = {
       editable: true,
+      onFocusCell: td => { clearTimeout(presT); presMine = td.dataset.k; presSet(presMine); clearInterval(presBeat); presBeat = setInterval(() => presMine && presSet(presMine), 15000); },
+      onBlurCell: () => { clearTimeout(presT); presT = setTimeout(() => { presMine = null; clearInterval(presBeat); presSet(''); }, 400); },
       onBulk: async (list, skipped, what) => {
         list = list.filter(({ td, v }) => { const ex = view.cells[td.dataset.k]; return !(ex ? ex.v === v : v === ''); });
         if (!list.length) { toast(skipped ? `입력할 수 있는 칸이 없습니다.` : '바뀐 내용이 없습니다.'); return; }
@@ -878,10 +1029,27 @@ async function participantMain(u) {
       onSave: saveFn = async (td, v, opts = {}) => {
         if (isClosed(sheet)) { toast('마감되어 저장할 수 없습니다.'); return false; }
         const k = td.dataset.k, ex = view.cells[k];
-        if (!opts.force && ex && ex.v && ex.by !== u.uid && v !== ex.v && !confirm(`${ex.name}님이 입력한 칸입니다. 수정할까요?`)) return false;
-        const loc = JSON.parse(td.dataset.loc);
+        const { pr, pc, ...loc } = JSON.parse(td.dataset.loc);
         try {
-          await ref.collection('cells').doc(k).set({ ...loc, k, v, label: td.dataset.label, by: u.uid, name: me.name, dept: me.dept, at: TS() });
+          const cref = ref.collection('cells').doc(k), rec = { ...loc, k, v, label: td.dataset.label, by: u.uid, name: me.name, dept: me.dept, at: TS() };
+          if (opts.force) await cref.set(rec);
+          else {
+            /* 저장 직전에 서버 값을 확인해, 다른 사람이 입력한 칸이면 물어보고, 확인하는 사이 바뀌면 다시 확인 */
+            let acked = null;
+            for (let tries = 0; ; tries++) {
+              let sv = null; try { const sn = await cref.get({ source: 'server' }); sv = sn.exists ? sn.data() : null; } catch (er) { sv = ex || null; }
+              const sval = sv ? sv.v : '';
+              if (sv && sval && sv.by !== u.uid && sval !== v && sval !== acked) {
+                const fresh = sval !== (ex ? ex.v : '');
+                if (!confirm(fresh ? `방금 ${sv.name}님이 이 칸에 입력했습니다. 내 값으로 바꿀까요?` : `${sv.name}님이 입력한 칸입니다. 수정할까요?`)) return false;
+                acked = sval;
+              }
+              try {
+                await db.runTransaction(async tx => { const cur = await tx.get(cref); if ((cur.exists ? cur.data().v : '') !== sval) throw new Error('CHANGED'); tx.set(cref, rec); });
+                break;
+              } catch (er) { if (er.message === 'CHANGED' && tries < 3) continue; throw er; }
+            }
+          }
           ref.collection('log').add({ k, label: td.dataset.label, prev: ex ? ex.v : '', v, by: u.uid, name: me.name, dept: me.dept, at: TS() }).catch(() => { });
           touchPerson();
           if (!opts.quiet) toast('저장되었습니다 ✓');
@@ -890,12 +1058,66 @@ async function participantMain(u) {
         } catch (e) { console.error(e); toast('저장 실패 [' + (e.code || '') + ']: ' + (e.code === 'permission-denied' ? '권한이 없거나 마감되었습니다. (Firestore 규칙/익명 로그인 설정을 확인해 주세요)' : e.message)); return false; }
         return true;
       }
+  };
+  try {
+    const bytes = await loadBytes(sid);
+    const vbox = $('#vbox');
+    const gutterOn = () => sheet.type === 'xlsx' && !!sheet.allowAddRows && !isClosed(sheet);
+    const build = async () => {
+      if (building) { dirty = true; return; }
+      building = true; dirty = false;
+      try {
+        const tabI = Math.max(0, [...vbox.querySelectorAll('[data-tab]')].findIndex(b => b.classList.contains('on')));
+        const sc = [...vbox.querySelectorAll('.pane')].map(p => [p.scrollLeft, p.scrollTop]);
+        const r = await renderFile(sheet, bytes, { rows: allRows, gutter: gutterOn(), uid: u.uid });
+        vbox.textContent = '';
+        const note = document.createElement('div'), host = document.createElement('div'); vbox.appendChild(note); vbox.appendChild(host);
+        view = mountView(host, r, opt);
+        if (view.count) { note.className = 'muted'; note.style.marginBottom = '6px'; note.textContent = `입력할 수 있는 칸: ${view.count}개 (점선으로 표시된 칸)`; }
+        else { note.className = 'warn'; note.innerHTML = '<b>입력할 수 있는 빈 칸을 찾지 못했습니다.</b><br>서식의 입력 칸에 공백·기호 등이 이미 들어 있으면 빈 칸으로 인식되지 않습니다. 파일 등록자에게 "이미 내용이 있는 칸도 수정 가능" 옵션으로 다시 등록해 달라고 요청해 주세요.'; }
+        for (const k in allCells) view.update(k, allCells[k]);
+        const tb = host.querySelectorAll('[data-tab]')[tabI]; if (tb && tabI) tb.click();
+        host.querySelectorAll('.pane').forEach((p, i) => { if (sc[i]) { p.scrollLeft = sc[i][0]; p.scrollTop = sc[i][1]; } });
+        if (pendingFocus) {
+          const t = [...host.querySelectorAll('td.ed')].find(x => (x.dataset.k || '').includes('@' + pendingFocus));
+          if (t) { pendingFocus = null; const sl = t.querySelector('select'); (sl || t).focus(); try { t.scrollIntoView({ block: 'nearest' }); } catch (er) { } }
+        }
+        renderMine(); applyPresence();
+      } catch (e) { console.error(e); vbox.textContent = '서식을 불러오지 못했습니다: ' + e.message; }
+      building = false; if (dirty) requestBuild();
+    };
+    const editing = () => { const a = document.activeElement; return !!(a && a.closest && vbox.contains(a) && a.closest('td.ed')); };
+    const requestBuild = () => { if (editing()) { dirty = true; return; } build(); };
+    vbox.addEventListener('focusout', () => setTimeout(() => { if (dirty && !building && !editing()) build(); }, 350));
+    const addRow = async d => {
+      if (isClosed(sheet)) return toast('마감되어 행을 추가할 수 없습니다.');
+      const id = ref.collection('rows').doc().id; pendingFocus = id;
+      try { await ref.collection('rows').doc(id).set({ si: +d.si, after: d.rk, root: +d.root, src: +d.src, by: u.uid, name: me.name, dept: me.dept, ts: Date.now(), at: TS() }); }
+      catch (e) { pendingFocus = null; console.error(e); toast('행 추가 실패 [' + (e.code || '') + ']' + (e.code === 'permission-denied' ? ': 권한이 없거나 마감되었습니다. (Firestore 규칙에 rows 항목이 게시되었는지 확인해 주세요)' : ': ' + e.message)); }
+    };
+    const delRow = async d => {
+      const meta = allRows.find(x => x.id === d.rk); if (!meta || meta.by !== u.uid) return;
+      if (allRows.some(x => x.after === d.rk)) return toast('이 행 아래에 다른 행이 추가되어 있어 삭제할 수 없습니다.');
+      const cs = Object.values(allCells).filter(c => c.kind === 'x' && c.si === meta.si && String(c.addr).endsWith('@' + d.rk) && c.v !== '');
+      if (cs.some(c => c.by !== u.uid)) return toast('다른 사람이 입력한 내용이 있어 삭제할 수 없습니다.');
+      if (!confirm('내가 추가한 이 행을 삭제할까요?' + (cs.length ? ` (입력한 ${cs.length}칸의 내용도 함께 지워집니다)` : ''))) return;
+      try {
+        const b = db.batch(); cs.forEach(c => b.update(ref.collection('cells').doc(c.k), { v: '', at: TS() })); b.delete(ref.collection('rows').doc(d.rk)); await b.commit();
+        toast('행을 삭제했습니다.');
+      } catch (e) { console.error(e); toast('행 삭제 실패 [' + (e.code || '') + ']: ' + e.message); }
+    };
+    vbox.addEventListener('click', async e => {
+      const b = e.target.closest && e.target.closest('button.rb'); const g = b && b.closest('td.rh'); if (!g) return;
+      b.disabled = true; try { if (b.dataset.act === 'add') await addRow(g.dataset); else await delRow(g.dataset); } finally { b.disabled = false; }
     });
-    $('#vbox').insertAdjacentHTML('afterbegin', view.count
-      ? `<div class="muted" style="margin-bottom:6px">입력할 수 있는 칸: ${view.count}개 (점선으로 표시된 칸)</div>`
-      : '<div class="warn"><b>입력할 수 있는 빈 칸을 찾지 못했습니다.</b><br>서식의 입력 칸에 공백·기호 등이 이미 들어 있으면 빈 칸으로 인식되지 않습니다. 파일 등록자에게 "이미 내용이 있는 칸도 수정 가능" 옵션으로 다시 등록해 달라고 요청해 주세요.</div>');
-    subs.push(ref.collection('cells').onSnapshot(s => { s.docChanges().forEach(ch => { if (ch.type !== 'removed') view.update(ch.doc.id, ch.doc.data({ serverTimestamps: 'estimate' })); }); renderMine(); }, e => toast('입력 내용을 불러오지 못했습니다 [' + (e.code || '') + ']')));
-    subs.push(ref.onSnapshot(s => { if (s.exists) sheet = { id: sid, ...s.data() }; }));
+    subs.push(ref.collection('cells').onSnapshot(s => { s.docChanges().forEach(ch => { if (ch.type !== 'removed') { const dt = ch.doc.data({ serverTimestamps: 'estimate' }); allCells[ch.doc.id] = dt; if (view) view.update(ch.doc.id, dt); } }); renderMine(); }, e => toast('입력 내용을 불러오지 못했습니다 [' + (e.code || '') + ']')));
+    subs.push(ref.collection('presence').onSnapshot(s => { presDocs = {}; s.forEach(d => presDocs[d.id] = d.data()); applyPresence(); }, () => { }));
+    subs.push(ref.collection('rows').onSnapshot(s => {
+      allRows = s.docs.map(d => ({ id: d.id, ...d.data() }));
+      const sig = allRows.map(d => d.id + d.after).sort().join('|');
+      if (rowsReady && sig === rowSig) return; rowSig = sig; rowsReady = true; requestBuild();
+    }, e => { console.error(e); if (!rowsReady) { rowsReady = true; requestBuild(); } toast('추가된 행 정보를 불러오지 못했습니다 [' + (e.code || '') + '] (Firestore 규칙에 rows 항목이 있어야 합니다)'); }));
+    subs.push(ref.onSnapshot(s => { if (s.exists) { const was = gutterOn(); sheet = { id: sid, ...s.data() }; if (was !== gutterOn() && rowsReady) requestBuild(); } }));
   } catch (e) { $('#vbox').innerHTML = '서식을 불러오지 못했습니다: ' + esc(e.message); }
 }
 
@@ -952,7 +1174,7 @@ async function deleteSheet(id, pre) {
   try {
     if (pre) pre();
     const ref = db.collection('sheets').doc(id);
-    for (const c of ['cells', 'log', 'people', 'chunks']) for (;;) { const s = await ref.collection(c).limit(400).get(); if (s.empty) break; const b = db.batch(); s.docs.forEach(d => b.delete(d.ref)); await b.commit(); }
+    for (const c of ['cells', 'log', 'people', 'rows', 'presence', 'chunks']) for (;;) { const s = await ref.collection(c).limit(400).get(); if (s.empty) break; const b = db.batch(); s.docs.forEach(d => b.delete(d.ref)); await b.commit(); }
     await ref.delete(); toast('삭제했습니다.'); return true;
   } catch (e) { toast('삭제 실패: ' + e.message); return false; }
 }
@@ -963,6 +1185,7 @@ function editModal(sheet, onDone) {
     <label>제목</label><input id="et" style="width:100%" value="${esc(sheet.title)}">
     <label>마감 일시 (비우면 마감 없음)</label><input type="datetime-local" id="ed" value="${dl}">
     <label><input type="checkbox" id="ea" ${sheet.allowFilled ? 'checked' : ''}> 이미 내용이 있는 칸도 수정 가능</label>
+    ${sheet.type === 'xlsx' ? `<label><input type="checkbox" id="er2" ${sheet.allowAddRows ? 'checked' : ''}> 입력자가 표에 행 추가 허용 (같은 서식의 행을 아래에 추가)</label>` : ''}
     <label>비밀번호 ${sheet.pwHash ? '(설정됨)' : '(없음)'}</label><input id="ep" style="width:100%" placeholder="바꾸려면 새 비밀번호 입력, 그대로 두려면 비워 두세요">
     ${sheet.pwHash ? '<label><input type="checkbox" id="er"> 비밀번호 삭제</label>' : ''}
     <div class="muted" style="margin-top:6px">파일 내용 자체는 바꿀 수 없습니다. 서식을 바꾸려면 새로 등록해 주세요.</div>
@@ -971,6 +1194,7 @@ function editModal(sheet, onDone) {
   $('#ec').onclick = () => m.remove();
   $('#es').onclick = async () => {
     const upd = { title: $('#et').value.trim() || sheet.title, allowFilled: $('#ea').checked };
+    if ($('#er2')) upd.allowAddRows = $('#er2').checked;
     upd.deadlineAt = $('#ed').value ? firebase.firestore.Timestamp.fromDate(new Date($('#ed').value)) : firebase.firestore.FieldValue.delete();
     const pw = $('#ep').value;
     if (pw) upd.pwHash = await sha(sheet.id + pw); else if ($('#er') && $('#er').checked) upd.pwHash = firebase.firestore.FieldValue.delete();
@@ -988,6 +1212,7 @@ function newForm(u) {
     <label>파일 (.xlsx 또는 .hwpx, 5MB 이하)</label><input type="file" id="nf" accept=".xlsx,.hwpx">
     <div class="muted">.xls / .hwp 파일은 엑셀·한글에서 .xlsx / .hwpx로 다시 저장한 뒤 올려 주세요.</div>
     <label><input type="checkbox" id="na"> 이미 내용이 있는 칸도 수정 가능하게 (기본: 빈 칸만 입력)</label>
+    <label><input type="checkbox" id="nr" checked> 입력자가 표에 행 추가 허용 (엑셀만 · 같은 서식의 행을 아래에 추가)</label>
     <label>비밀번호 (선택)</label><input id="np" placeholder="없으면 비워 두세요">
     <label>마감 일시 (선택)</label><input type="datetime-local" id="nd">
     <div class="row" style="margin-top:16px"><button class="pri" id="ns">등록하고 링크 만들기</button><button id="nc">취소</button></div></div></div>`;
@@ -1001,7 +1226,7 @@ function newForm(u) {
     const btn = $('#ns'); btn.disabled = true; btn.textContent = '등록 중…';
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
-      const sheetData = { title: title || f.name.replace(/\.[^.]+$/, ''), type: ext, fileName: f.name, allowFilled: $('#na').checked, closed: false, ownerUid: u.uid, ownerName: u.displayName || u.email || '', createdAt: TS() };
+      const sheetData = { title: title || f.name.replace(/\.[^.]+$/, ''), type: ext, fileName: f.name, allowFilled: $('#na').checked, allowAddRows: ext === 'xlsx' && $('#nr').checked, closed: false, ownerUid: u.uid, ownerName: u.displayName || u.email || '', createdAt: TS() };
       const test = await renderFile(sheetData, bytes);
       if (!test.panes.some(p => p.html.includes('class="ed"'))) { if (!confirm('입력 가능한 빈 칸을 찾지 못했습니다. 그래도 등록할까요?')) throw new Error('취소됨'); }
       const ref = db.collection('sheets').doc();
@@ -1053,7 +1278,7 @@ async function adminDetail(id) {
     const ps = people_stats();
     const cur = $('#fl').value;
     $('#fl').innerHTML = '<option value="">전체</option>' + ps.map(p => `<option value="${esc(p.uid)}" ${p.uid === cur ? 'selected' : ''}>${esc(p.name)}${p.dept ? ' (' + esc(p.dept) + ')' : ''} · ${p.n}칸</option>`).join('');
-    $('#stat').textContent = view ? `입력된 칸 ${cellList().length} / 입력 가능한 칸 ${view.count} · 참여 ${ps.length}명` : '';
+    $('#stat').textContent = view ? `입력된 칸 ${cellList().length} / 입력 가능한 칸 ${view.count} · 참여 ${ps.length}명${getRows().length ? ' · 추가된 행 ' + getRows().length + '개' : ''}` : '';
     if (tab === 'ppl') $('#p_ppl').innerHTML = ps.length ? `<table class="list"><tr><th>이름</th><th>부서</th><th>입력한 칸</th><th>최근 입력</th><th></th></tr>${ps.map(p => `<tr><td><span class="legend"><span style="background:hsl(${hue(p.uid)} 75% 90%)">${esc(p.name)}</span></span></td><td>${esc(p.dept || '')}</td><td>${p.n}</td><td>${fmt(p.last)}</td><td><button data-u="${esc(p.uid)}">이 사람이 입력한 칸 보기</button></td></tr>`).join('')}</table>` : '<p class="muted">아직 참여한 사람이 없습니다.</p>';
     if (tab === 'ppl') $('#p_ppl').querySelectorAll('[data-u]').forEach(b => b.onclick = () => { $('#fl').value = b.dataset.u; showTab('res'); view && view.setFilter(b.dataset.u); });
   };
@@ -1071,12 +1296,32 @@ async function adminDetail(id) {
   document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => showTab(b.dataset.t));
   $('#fl').onchange = () => view && view.setFilter($('#fl').value);
 
-  let bytes;
+  let bytes, getRows = () => [];
   try {
     bytes = await loadBytes(id);
-    const r = await renderFile(sheet, bytes);
-    view = mountView($('#vbox'), r, { editable: false });
-    subs.push(ref.collection('cells').onSnapshot(s => { s.docChanges().forEach(ch => { if (ch.type !== 'removed') view.update(ch.doc.id, ch.doc.data({ serverTimestamps: 'estimate' })); }); refresh(); }));
+    const vb = $('#vbox'); let allRows = [], allCells = {}, rowSig = null, rowsReady = false, building = false, again = false;
+    const build = async () => {
+      if (building) { again = true; return; } building = true; again = false;
+      try {
+        const tabI = Math.max(0, [...vb.querySelectorAll('[data-tab]')].findIndex(b => b.classList.contains('on')));
+        const sc = [...vb.querySelectorAll('.pane')].map(p => [p.scrollLeft, p.scrollTop]);
+        const r = await renderFile(sheet, bytes, { rows: allRows });
+        view = mountView(vb, r, { editable: false });
+        for (const k in allCells) view.update(k, allCells[k]);
+        view.setFilter($('#fl').value);
+        const tb = vb.querySelectorAll('[data-tab]')[tabI]; if (tb && tabI) tb.click();
+        vb.querySelectorAll('.pane').forEach((p, i) => { if (sc[i]) { p.scrollLeft = sc[i][0]; p.scrollTop = sc[i][1]; } });
+        refresh();
+      } catch (e) { console.error(e); vb.textContent = '서식을 불러오지 못했습니다: ' + e.message; }
+      building = false; if (again) build();
+    };
+    getRows = () => allRows;
+    subs.push(ref.collection('cells').onSnapshot(s => { s.docChanges().forEach(ch => { if (ch.type !== 'removed') { const dt = ch.doc.data({ serverTimestamps: 'estimate' }); allCells[ch.doc.id] = dt; if (view) view.update(ch.doc.id, dt); } }); refresh(); }));
+    subs.push(ref.collection('rows').onSnapshot(s => {
+      allRows = s.docs.map(d => ({ id: d.id, ...d.data() }));
+      const sig = allRows.map(d => d.id + d.after).sort().join('|');
+      if (rowsReady && sig === rowSig) return; rowSig = sig; rowsReady = true; build();
+    }, e => { console.error(e); if (!rowsReady) { rowsReady = true; build(); } toast('추가된 행 정보를 불러오지 못했습니다 [' + (e.code || '') + '] (Firestore 규칙에 rows 항목을 추가·게시해 주세요)'); }));
     subs.push(ref.collection('people').onSnapshot(s => { people = {}; s.forEach(d => people[d.id] = d.data()); refresh(); }));
     subs.push(ref.onSnapshot(s => { if (s.exists) { sheet = { id, ...s.data() }; paintHead(); } }));
   } catch (e) { $('#vbox').textContent = '서식을 불러오지 못했습니다: ' + e.message; }
@@ -1085,7 +1330,7 @@ async function adminDetail(id) {
     if (!view) return; const b = $('#dl'); b.disabled = true;
     try {
       const list = cellList().concat(Object.values(view.cells).filter(r => r.v === ''));
-      const blob = sheet.type === 'xlsx' ? await buildXlsx(bytes, list) : await buildHwpx(bytes, list);
+      const blob = sheet.type === 'xlsx' ? await buildXlsx(bytes, list, getRows()) : await buildHwpx(bytes, list);
       dlBlob(blob, sheet.fileName.replace(/\.[^.]+$/, '') + '_취합.' + sheet.type);
     } catch (e) { toast('다운로드 실패: ' + e.message); }
     b.disabled = false;
