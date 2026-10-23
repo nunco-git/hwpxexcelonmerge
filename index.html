@@ -10,7 +10,7 @@ body{margin:0;font-family:'Malgun Gothic','Apple SD Gothic Neo',system-ui,sans-s
 .top{height:6px;background:linear-gradient(90deg,#f59e0b 33%,#22c55e 33% 66%,#3b82f6 66%)}
 .bar{background:#fff;border-bottom:1px solid #dde1e6;padding:10px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .bar h1{font-size:17px;margin:0;flex:1}
-.wrap{max-width:1280px;margin:0 auto;padding:14px}
+.wrap{max-width:100%;margin:0 auto;padding:14px 20px}
 .card{background:#fff;border-radius:10px;padding:16px;box-shadow:0 1px 3px #0002;margin-bottom:12px}
 .card h2{margin:0 0 10px;font-size:16px}
 button,.btn{font:inherit;border:1px solid #cfd4da;background:#fff;border-radius:7px;padding:7px 12px;cursor:pointer}
@@ -1714,7 +1714,30 @@ function editModal(sheet, onDone) {
   };
 }
 function linkOf(id) { return location.origin + location.pathname + '?s=' + id; }
-function copyLink(id) { navigator.clipboard.writeText(linkOf(id)).then(() => toast('링크를 복사했습니다.'), () => prompt('링크를 복사하세요', linkOf(id))); }
+function copyLink(id) {
+  const text = linkOf(id);
+  const fallback = () => {
+    // 클립보드 API가 막힌 환경(iframe, 비보안 주소 등)용 대체 복사
+    let ok = false;
+    const inp = document.getElementById('lk');
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+      document.body.appendChild(ta); ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+      ok = document.execCommand('copy');
+      ta.remove();
+    } catch (e) { ok = false; }
+    if (ok) { toast('링크를 복사했습니다.'); }
+    else {
+      if (inp) { inp.focus(); inp.select(); }
+      toast('자동 복사가 안 되어 링크를 선택해 두었습니다. Ctrl+C로 복사해 주세요.');
+    }
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => toast('링크를 복사했습니다.'), fallback);
+  } else { fallback(); }
+}
 
 function newForm(u) {
   app.innerHTML = adminBar(u) + `<div class="wrap"><div class="card" style="max-width:620px"><h2>새 파일 등록</h2>
