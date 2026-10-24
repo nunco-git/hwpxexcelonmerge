@@ -1352,18 +1352,35 @@ function msgPage(title, body) { clearSubs(); app.innerHTML = `<div class="card c
 /* =====================================================
  *  부서원 화면 (링크로 접속)
  * ===================================================== */
-function askMe(prev) {
+const INFO_FIELDS = [['org', '기관명'], ['dept', '부서명'], ['team', '팀명'], ['name', '이름'], ['phone', '전화번호']];
+const DEFAULT_INFO = ['dept', 'name'];
+const infoOf = sheet => { const a = sheet && Array.isArray(sheet.infoFields) && sheet.infoFields.length ? sheet.infoFields : DEFAULT_INFO; return INFO_FIELDS.map(x => x[0]).filter(k => a.includes(k)); };
+const infoChecks = (sel, idPrefix) => INFO_FIELDS.map(([k, l]) => `<label style="display:inline-block;margin-right:12px"><input type="checkbox" id="${idPrefix}${k}" ${sel.includes(k) ? 'checked' : ''}> ${l}</label>`).join('');
+const readInfoChecks = idPrefix => INFO_FIELDS.map(x => x[0]).filter(k => $('#' + idPrefix + k).checked);
+const meFields = me => (me && me.f) || (me ? { name: me.name || '', dept: me.dept || '' } : {});
+const meComplete = (me, fields) => !!me && fields.every(k => String(meFields(me)[k] || '').trim());
+const meBuild = (f, fields) => {
+  const g = k => fields.includes(k) ? String(f[k] || '').trim() : '';
+  const grp = [g('org'), g('dept'), g('team')].filter(Boolean).join(' ');
+  const name = g('name') || grp || g('phone');
+  const out = { f: {}, name, dept: g('name') ? grp : '', phone: g('phone') };
+  fields.forEach(k => out.f[k] = g(k));
+  return out;
+};
+const whoText = c => c ? `${c.name || ''}${c.dept ? ' (' + c.dept + ')' : ''}` : '';
+function askMe(prev, fields) {
+  fields = fields && fields.length ? fields : DEFAULT_INFO;
+  const pf = meFields(prev);
   return new Promise(res => {
     const m = document.createElement('div'); m.className = 'modal';
     m.innerHTML = `<div class="box"><h2 style="margin:0 0 6px">입력자 정보</h2><p class="muted" style="margin:0 0 6px">입력한 칸마다 이 정보가 기록되어 파일 등록자가 확인할 수 있습니다.</p>
-      <label>이름</label><input id="mn" style="width:100%" value="${esc(prev && prev.name || '')}">
-      <label>부서</label><input id="md" style="width:100%" value="${esc(prev && prev.dept || '')}">
+      ${INFO_FIELDS.filter(x => fields.includes(x[0])).map(([k, l]) => `<label>${l}</label><input id="mi_${k}" style="width:100%" ${k === 'phone' ? 'type="tel" placeholder="예: 010-1234-5678"' : ''} value="${esc(pf[k] || '')}">`).join('')}
       <div class="row" style="margin-top:14px;justify-content:flex-end"><button class="pri" id="mo">확인</button></div></div>`;
     document.body.appendChild(m);
     $('#mo').onclick = () => {
-      const name = $('#mn').value.trim(), dept = $('#md').value.trim();
-      if (!name) { toast('이름을 입력해 주세요.'); return; }
-      const me = { name, dept }; localStorage.setItem('fc_me', JSON.stringify(me)); m.remove(); res(me);
+      const f = {};
+      for (const [k, l] of INFO_FIELDS) if (fields.includes(k)) { f[k] = $('#mi_' + k).value.trim(); if (!f[k]) { toast(l + '을(를) 입력해 주세요.'); return; } }
+      const me = meBuild(f, fields); localStorage.setItem('fc_me', JSON.stringify(me)); m.remove(); res(me);
     };
   });
 }
@@ -1384,15 +1401,16 @@ async function participantMain(u) {
     }
   }
   let me; try { me = JSON.parse(localStorage.getItem('fc_me')); } catch (e) { }
-  if (!me || !me.name) me = await askMe();
-  const touchPerson = () => ref.collection('people').doc(u.uid).set({ name: me.name, dept: me.dept, lastAt: TS() }, { merge: true }).catch(() => { });
+  const infoFields = infoOf(sheet);
+  if (!meComplete(me, infoFields)) me = await askMe(me, infoFields);
+  const touchPerson = () => ref.collection('people').doc(u.uid).set({ name: me.name, dept: me.dept || '', phone: me.phone || '', info: me.f || {}, lastAt: TS() }, { merge: true }).catch(() => { });
   touchPerson();
   app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="undo" title="실행 취소 (Ctrl+Z)">↶ 실행 취소</button><button id="redo" title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button>${sheet.units > 1 ? '<button id="um" class="pri">쪽 선택</button>' : ''}<button id="mb">내 입력 목록</button><button id="mdl" title="원본 서식에 내가 입력한 내용만 채워 저장">내 입력 다운로드</button><button id="chg">입력자 변경</button></div>
     <div class="wrap"><div class="card"><div class="muted">점선 칸을 눌러 본인 항목을 입력하세요. 칸을 벗어나면(또는 Enter) 바로 저장됩니다. 다른 사람이 입력한 칸은 색으로 표시되고, 마우스를 올리면 입력자가 보입니다. (칸 안 줄바꿈: Alt+Enter)${sheet.allowAddRows ? (sheet.type === 'xlsx' ? ' 행 왼쪽의 ＋ 버튼을 누르면 그 아래에 같은 서식의 행이 추가됩니다.' : ' 표는 왼쪽 ＋로 행을, 위쪽 ＋로 열을 추가하고, 본문은 줄 왼쪽의 ＋로 줄을 추가할 수 있습니다.') : ''}</div></div>
     <div class="card" id="mine" style="display:none"></div>
     <div id="vbox" class="card">서식을 불러오는 중…</div></div>`;
-  const showWho = () => $('#who').textContent = `입력자: ${me.name}${me.dept ? ' (' + me.dept + ')' : ''}`; showWho();
-  $('#chg').onclick = async () => { me = await askMe(me); showWho(); touchPerson(); };
+  const showWho = () => $('#who').textContent = `입력자: ${me.name}${me.dept ? ' (' + me.dept + ')' : ''}${me.phone ? ' · ' + me.phone : ''}`; showWho();
+  $('#chg').onclick = async () => { me = await askMe(me, infoFields); showWho(); touchPerson(); };
   let view, saveFn, panelOpen = false;
   const hist = { u: [], r: [] };
   const pushHist = g => { if (g && g.length) { hist.u.push(g); if (hist.u.length > 100) hist.u.shift(); hist.r.length = 0; } };
@@ -1711,6 +1729,8 @@ function editModal(sheet, onDone) {
     <label>마감 일시 (비우면 마감 없음)</label><input type="datetime-local" id="ed" value="${dl}">
     <label><input type="checkbox" id="ea" ${sheet.allowFilled ? 'checked' : ''}> 이미 내용이 있는 칸도 수정 가능</label>
     <label><input type="checkbox" id="er2" ${sheet.allowAddRows ? 'checked' : ''}> 입력자가 행·열·본문 줄 추가 허용 (같은 서식으로 추가)</label>
+    <label>입력자에게 받을 정보</label><div>${infoChecks(infoOf(sheet), 'ei_')}</div>
+    <div class="muted">항목을 바꾸면 이미 참여한 사람은 다음에 접속할 때 새 항목을 다시 입력합니다.</div>
     <label>비밀번호 ${sheet.pwHash ? '(설정됨)' : '(없음)'}</label><input id="ep" style="width:100%" placeholder="바꾸려면 새 비밀번호 입력, 그대로 두려면 비워 두세요">
     ${sheet.pwHash ? '<label><input type="checkbox" id="er"> 비밀번호 삭제</label>' : ''}
     <div class="muted" style="margin-top:6px">파일 내용 자체는 바꿀 수 없습니다. 서식을 바꾸려면 새로 등록해 주세요.</div>
@@ -1718,7 +1738,8 @@ function editModal(sheet, onDone) {
   document.body.appendChild(m);
   $('#ec').onclick = () => m.remove();
   $('#es').onclick = async () => {
-    const upd = { title: $('#et').value.trim() || sheet.title, allowFilled: $('#ea').checked };
+    const infoSel = readInfoChecks('ei_'); if (!infoSel.length) return toast('입력자 정보를 1개 이상 선택해 주세요.');
+    const upd = { title: $('#et').value.trim() || sheet.title, allowFilled: $('#ea').checked, infoFields: infoSel };
     if ($('#er2')) upd.allowAddRows = $('#er2').checked;
     upd.deadlineAt = $('#ed').value ? firebase.firestore.Timestamp.fromDate(new Date($('#ed').value)) : firebase.firestore.FieldValue.delete();
     const pw = $('#ep').value;
@@ -1762,6 +1783,7 @@ function newForm(u) {
     <label><input type="checkbox" id="na"> 이미 내용이 있는 칸도 수정 가능하게 (기본: 빈 칸만 입력)</label>
     <label>같은 서식을 몇 장 복사할까요? (선택, 1쪽짜리 서식을 여러 명에게 받을 때)</label><input id="nu" type="number" min="1" max="50" style="width:100px" placeholder="예: 10"> <span class="muted">입력하면 서식을 그 수만큼 복사하고, 입력자가 자기 쪽을 선택합니다.</span>
     <label>쪽 이름 (선택, 한 줄에 하나씩)</label><textarea id="nn" rows="3" style="width:100%" placeholder="예:&#10;총무팀&#10;기획팀"></textarea>
+    <label>입력자에게 받을 정보 (체크한 항목을 입력자가 반드시 입력합니다)</label><div id="ninfo">${infoChecks(DEFAULT_INFO, 'ni_')}</div>
     <label><input type="checkbox" id="nr" checked> 입력자가 행·열·본문 줄 추가 허용 (엑셀은 행, 한글은 표의 행·열과 본문 줄)</label>
     <label>비밀번호 (선택)</label><input id="np" placeholder="없으면 비워 두세요">
     <label>마감 일시 (선택)</label><input type="datetime-local" id="nd">
@@ -1773,10 +1795,11 @@ function newForm(u) {
     const ext = (f.name.split('.').pop() || '').toLowerCase();
     if (!['xlsx', 'hwpx'].includes(ext)) return toast('.xlsx 또는 .hwpx 파일만 올릴 수 있습니다.');
     if (f.size > MAX_FILE) return toast('파일이 5MB를 넘습니다.');
+    const infoSel = readInfoChecks('ni_'); if (!infoSel.length) return toast('입력자 정보를 1개 이상 선택해 주세요.');
     const btn = $('#ns'); btn.disabled = true; btn.textContent = '등록 중…';
     try {
       let bytes = new Uint8Array(await f.arrayBuffer());
-      const sheetData = { title: title || f.name.replace(/\.[^.]+$/, ''), type: ext, fileName: f.name, allowFilled: $('#na').checked, allowAddRows: $('#nr').checked, closed: false, ownerUid: u.uid, ownerName: u.displayName || u.email || '', createdAt: TS() };
+      const sheetData = { title: title || f.name.replace(/\.[^.]+$/, ''), type: ext, fileName: f.name, allowFilled: $('#na').checked, allowAddRows: $('#nr').checked, infoFields: infoSel, closed: false, ownerUid: u.uid, ownerName: u.displayName || u.email || '', createdAt: TS() };
       const N = parseInt($('#nu').value, 10) || 1;
       if (N > 1) {
         if (N > 50) throw new Error('복사 개수는 50장까지입니다.');
@@ -1829,7 +1852,7 @@ async function adminDetail(id) {
   const cellList = () => Object.values(view ? view.cells : {}).filter(r => r.v !== '');
   const people_stats = () => {
     const m = {};
-    for (const [uid, p] of Object.entries(people)) m[uid] = { uid, name: p.name, dept: p.dept, n: 0, last: p.lastAt };
+    for (const [uid, p] of Object.entries(people)) m[uid] = { uid, name: p.name, dept: p.dept, phone: p.phone, n: 0, last: p.lastAt };
     for (const r of cellList()) { const x = m[r.by] || (m[r.by] = { uid: r.by, name: r.name, dept: r.dept, n: 0 }); x.n++; if (r.at && (!x.last || (r.at.toMillis ? r.at.toMillis() : 0) > (x.last.toMillis ? x.last.toMillis() : 0))) x.last = r.at; }
     return Object.values(m).sort((a, b) => b.n - a.n);
   };
@@ -1847,7 +1870,7 @@ async function adminDetail(id) {
       $('#p_del').innerHTML = ms.length ? `<div class="muted" style="margin-bottom:6px">다운로드하면 아래 항목이 실제로 삭제됩니다. 필요하면 복원하세요.</div><table class="list"><tr><th>항목</th><th>표시한 사람</th><th>일시</th><th></th></tr>${ms.map(m => `<tr><td>${esc(m.label || m.k)}</td><td>${esc(m.name || '')}${m.dept ? ' (' + esc(m.dept) + ')' : ''}</td><td>${fmt(m.at)}</td><td><button data-rm="${esc(m.k)}">복원</button></td></tr>`).join('')}</table>` : '<p class="muted">삭제 표시된 항목이 없습니다.</p>';
       $('#p_del').querySelectorAll('[data-rm]').forEach(b => b.onclick = () => ref.collection('marks').doc(b.dataset.rm).delete().catch(e => toast('복원 실패: ' + e.message)));
     }
-    if (tab === 'ppl') $('#p_ppl').innerHTML = ps.length ? `<table class="list"><tr><th>이름</th><th>부서</th><th>입력한 칸</th><th>최근 입력</th><th></th></tr>${ps.map(p => `<tr><td><span class="legend"><span style="background:hsl(${hue(p.uid)} 75% 90%)">${esc(p.name)}</span></span></td><td>${esc(p.dept || '')}</td><td>${p.n}</td><td>${fmt(p.last)}</td><td><button data-u="${esc(p.uid)}">이 사람이 입력한 칸 보기</button></td></tr>`).join('')}</table>` : '<p class="muted">아직 참여한 사람이 없습니다.</p>';
+    if (tab === 'ppl') $('#p_ppl').innerHTML = ps.length ? `<table class="list"><tr><th>이름</th><th>소속</th><th>전화번호</th><th>입력한 칸</th><th>최근 입력</th><th></th></tr>${ps.map(p => `<tr><td><span class="legend"><span style="background:hsl(${hue(p.uid)} 75% 90%)">${esc(p.name)}</span></span></td><td>${esc(p.dept || '')}</td><td>${esc(p.phone || '')}</td><td>${p.n}</td><td>${fmt(p.last)}</td><td><button data-u="${esc(p.uid)}">이 사람이 입력한 칸 보기</button></td></tr>`).join('')}</table>` : '<p class="muted">아직 참여한 사람이 없습니다.</p>';
     if (tab === 'ppl') $('#p_ppl').querySelectorAll('[data-u]').forEach(b => b.onclick = () => { $('#fl').value = b.dataset.u; showTab('res'); view && view.setFilter(b.dataset.u); });
   };
   const loadLog = async () => {
@@ -1909,8 +1932,8 @@ async function adminDetail(id) {
   $('#dp').onclick = async () => {
     try {
       const wb = new ExcelJS.Workbook();
-      const w1 = wb.addWorksheet('입력자'); w1.columns = [{ header: '이름', width: 14 }, { header: '부서', width: 18 }, { header: '입력한 칸 수', width: 14 }, { header: '최근 입력', width: 20 }];
-      people_stats().forEach(p => w1.addRow([p.name, p.dept || '', p.n, p.last && p.last.toDate ? p.last.toDate().toLocaleString('ko-KR') : '']));
+      const w1 = wb.addWorksheet('입력자'); w1.columns = [{ header: '이름', width: 14 }, { header: '소속', width: 22 }, { header: '전화번호', width: 16 }, { header: '입력한 칸 수', width: 14 }, { header: '최근 입력', width: 20 }];
+      people_stats().forEach(p => w1.addRow([p.name, p.dept || '', p.phone || '', p.n, p.last && p.last.toDate ? p.last.toDate().toLocaleString('ko-KR') : '']));
       const w2 = wb.addWorksheet('입력이력'); w2.columns = [{ header: '일시', width: 20 }, { header: '이름', width: 12 }, { header: '부서', width: 16 }, { header: '위치', width: 22 }, { header: '이전 값', width: 24 }, { header: '입력 값', width: 24 }];
       const s = await ref.collection('log').orderBy('at').limit(5000).get();
       s.forEach(d => { const x = d.data({ serverTimestamps: 'estimate' }); w2.addRow([x.at && x.at.toDate ? x.at.toDate().toLocaleString('ko-KR') : '', x.name, x.dept || '', x.label, x.prev, x.v]); });
