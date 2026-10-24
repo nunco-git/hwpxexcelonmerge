@@ -1387,7 +1387,7 @@ async function participantMain(u) {
   if (!me || !me.name) me = await askMe();
   const touchPerson = () => ref.collection('people').doc(u.uid).set({ name: me.name, dept: me.dept, lastAt: TS() }, { merge: true }).catch(() => { });
   touchPerson();
-  app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="undo" title="실행 취소 (Ctrl+Z)">↶ 실행 취소</button><button id="redo" title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button>${sheet.units > 1 ? '<button id="um" class="pri">쪽 선택</button>' : ''}<button id="mb">내 입력 목록</button><button id="chg">입력자 변경</button></div>
+  app.innerHTML = `<div class="bar"><h1>${esc(sheet.title)}</h1><span class="muted" id="who"></span><button id="undo" title="실행 취소 (Ctrl+Z)">↶ 실행 취소</button><button id="redo" title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button>${sheet.units > 1 ? '<button id="um" class="pri">쪽 선택</button>' : ''}<button id="mb">내 입력 목록</button><button id="mdl" title="원본 서식에 내가 입력한 내용만 채워 저장">내 입력 다운로드</button><button id="chg">입력자 변경</button></div>
     <div class="wrap"><div class="card"><div class="muted">점선 칸을 눌러 본인 항목을 입력하세요. 칸을 벗어나면(또는 Enter) 바로 저장됩니다. 다른 사람이 입력한 칸은 색으로 표시되고, 마우스를 올리면 입력자가 보입니다. (칸 안 줄바꿈: Alt+Enter)${sheet.allowAddRows ? (sheet.type === 'xlsx' ? ' 행 왼쪽의 ＋ 버튼을 누르면 그 아래에 같은 서식의 행이 추가됩니다.' : ' 표는 왼쪽 ＋로 행을, 위쪽 ＋로 열을 추가하고, 본문은 줄 왼쪽의 ＋로 줄을 추가할 수 있습니다.') : ''}</div></div>
     <div class="card" id="mine" style="display:none"></div>
     <div id="vbox" class="card">서식을 불러오는 중…</div></div>`;
@@ -1432,6 +1432,20 @@ async function participantMain(u) {
       if (!confirm('이 칸의 입력 내용을 삭제할까요?')) return;
       const td = tdOf(b.dataset.d); if (td) await saveFn(td, '');
     });
+  };
+  let srcBytes = null;
+  $('#mdl').onclick = async () => {
+    if (!view) return toast('서식을 불러오는 중입니다. 잠시 후 다시 시도해 주세요.');
+    const mine = Object.values(view.cells).filter(r => r.by === u.uid && r.v !== '').sort((a, b) => String(a.label).localeCompare(String(b.label), 'ko', { numeric: true }));
+    if (!mine.length) return toast('아직 입력한 내용이 없습니다.');
+    if (!srcBytes) return toast('원본 서식을 불러오는 중입니다. 잠시 후 다시 시도해 주세요.');
+    const b = $('#mdl'); b.disabled = true;
+    try {
+      // 원본 서식 파일에 "내가 입력한 칸"만 채워서 저장 (다른 사람 입력·삭제 표시는 반영하지 않음)
+      const blob = sheet.type === 'xlsx' ? await buildXlsx(srcBytes, mine, allRows, []) : await buildHwpx(srcBytes, mine, sheet, allRows, []);
+      dlBlob(blob, sheet.fileName.replace(/\.[^.]+$/, '') + '_내입력' + (me.name ? '_' + me.name : '') + '.' + sheet.type);
+    } catch (e) { console.error(e); toast('다운로드 실패: ' + e.message); }
+    b.disabled = false;
   };
   $('#mb').onclick = () => { panelOpen = !panelOpen; $('#mine').style.display = panelOpen ? '' : 'none'; renderMine(); };
   let allRows = [], allCells = {}, rowSig = null, rowsReady = false, dirty = false, building = false, pendingFocus = null, pendingPaste = null, marks = {}, lastMark = null, hideDel = false, claims = {};
@@ -1498,7 +1512,7 @@ async function participantMain(u) {
       }
   };
   try {
-    const bytes = await loadBytes(sid);
+    const bytes = await loadBytes(sid); srcBytes = bytes;
     const vbox = $('#vbox');
     const gutterOn = () => !!sheet.allowAddRows && !isClosed(sheet);
     const build = async () => {
