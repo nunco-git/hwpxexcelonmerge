@@ -422,18 +422,35 @@ function fmtCalc(x, nf) {
 }
 
 /* ---------- 엑셀 렌더링 ---------- */
-function xStyle(cell) {
+function xBorder(side, e) {
+  if (!e || !e.style) return `border-${side}:1px solid #e4e4e4;`;
+  const st = e.style, col = e.color && e.color.argb ? '#' + String(e.color.argb).slice(-6) : '#000';
+  let w = 1, kind = 'solid';
+  if (st === 'medium' || st === 'mediumDashed' || st === 'mediumDashDot' || st === 'mediumDashDotDot') w = 2;
+  else if (st === 'thick') w = 3;
+  else if (st === 'double') { w = 3; kind = 'double'; }
+  if (/dash/i.test(st)) kind = 'dashed'; else if (st === 'dotted' || st === 'hair') kind = 'dotted';
+  return `border-${side}:${w}px ${kind} ${col};`;
+}
+/* 병합 셀이면 mb = {top,left,bottom,right} 로 가장자리 셀의 테두리를 넘겨 받는다 */
+function xStyle(cell, mb) {
   let s = ''; const f = cell.font || {};
   if (f.bold) s += 'font-weight:700;'; if (f.italic) s += 'font-style:italic;';
+  if (f.underline) s += 'text-decoration:underline;'; if (f.strike) s += 'text-decoration:line-through;';
+  if (f.name) s += `font-family:'${String(f.name).replace(/'/g, '')}','Malgun Gothic',sans-serif;`;
   if (f.size) s += `font-size:${Math.round(f.size * 1.33)}px;`;
   if (f.color && f.color.argb) s += `color:#${f.color.argb.slice(2)};`;
   const fl = cell.fill;
   if (fl && fl.type === 'pattern' && fl.pattern === 'solid' && fl.fgColor && fl.fgColor.argb) s += `background:#${fl.fgColor.argb.slice(2)};`;
   const al = cell.alignment || {};
-  if (al.horizontal) s += `text-align:${al.horizontal === 'centerContinuous' ? 'center' : al.horizontal};`;
-  s += `vertical-align:${al.vertical === 'top' ? 'top' : al.vertical === 'bottom' ? 'bottom' : 'middle'};`;
+  let ha = al.horizontal;
+  if (!ha || ha === 'general') { try { let v = cell.value; if (v && typeof v === 'object' && 'result' in v) v = v.result; if (typeof v === 'number') ha = 'right'; } catch (e) { } }
+  if (ha) s += `text-align:${ha === 'centerContinuous' ? 'center' : ha === 'fill' ? 'left' : ha === 'distributed' ? 'justify' : ha};`;
+  s += `vertical-align:${al.vertical === 'top' ? 'top' : al.vertical === 'center' || al.vertical === 'middle' ? 'middle' : 'bottom'};`;
+  if (al.wrapText) s += 'white-space:pre-wrap;word-break:break-all;'; else s += 'white-space:pre;';
+  if (al.indent) s += `padding-left:${4 + al.indent * 9}px;`;
   const b = cell.border || {};
-  for (const side of ['top', 'left', 'bottom', 'right']) s += b[side] && b[side].style ? `border-${side}:1px solid #555;` : `border-${side}:1px solid #e4e4e4;`;
+  for (const side of ['top', 'left', 'bottom', 'right']) s += xBorder(side, mb ? mb[side] : b[side]);
   return s;
 }
 /* ---------- 행 추가 (엑셀) : 가상 행 모델 + 수식·병합·검증 이동 ---------- */
@@ -654,34 +671,52 @@ async function renderXlsx(bytes, sheet, ro) {
       S.cf.forEach(x => String(x.ref).split(/\s+/).forEach(t => { const g = parseCfRange(t); if (g && (g.r2 - g.r1 + 1) * (g.c2 - g.c1 + 1) <= 20000) for (let r = g.r1; r <= g.r2; r++) for (let c = g.c1; c <= g.c2; c++) cfSet.add(r + ',' + c); }));
     } catch (e) { S.cf = []; }
     if (ws.state && ws.state !== 'visible') return;
+    const R = Math.min(ws.rowCount || 1, 500), C = Math.min(ws.columnCount || 1, 60);
+    const defW = (ws.properties && ws.properties.defaultColWidth) || 8.43, defH = (ws.properties && ws.properties.defaultRowHeight) || 15;
+    const colPx = c => Math.round((ws.getColumn(c).width || defW) * 7 + 5);
+    const rowPx = r => { const rw = ws.getRow(r); return Math.round((rw.height || defH) * 1.333); };
+    const rowVis = r => !ws.getRow(r).hidden, colVis = c => !ws.getColumn(c).hidden;
+    /* 병합: 화면에 실제로 그려지는(숨김·표시한도 안) 행·열만 세어 span 계산. 시작 칸이 숨겨져 있으면 보이는 첫 칸에 그린다 */
     const merges = {}, covered = new Set();
     ((ws.model && ws.model.merges) || []).forEach(m => {
-      const [a, b] = m.split(':'); const ca = ws.getCell(a), cb = ws.getCell(b);
-      merges[a] = { rs: cb.row - ca.row + 1, cs: cb.col - ca.col + 1 };
-      for (let r = ca.row; r <= cb.row; r++) for (let c = ca.col; c <= cb.col; c++) if (r !== ca.row || c !== ca.col) covered.add(r + ',' + c);
+      try {
+        const [a, b] = m.split(':'); const ca = ws.getCell(a), cb = ws.getCell(b || a);
+        const vr = [], vc = [];
+        for (let r = ca.row; r <= Math.min(cb.row, R); r++) if (rowVis(r)) vr.push(r);
+        for (let c = ca.col; c <= Math.min(cb.col, C); c++) if (colVis(c)) vc.push(c);
+        for (let r = ca.row; r <= cb.row; r++) for (let c = ca.col; c <= cb.col; c++) covered.add(r + ',' + c);
+        if (!vr.length || !vc.length) return;
+        const ar = vr[0], ac = vc[0];
+        covered.delete(ar + ',' + ac);
+        const edge = (r, c) => { try { return ws.getCell(r, c).border || {}; } catch (e) { return {}; } };
+        merges[ar + ',' + ac] = {
+          rs: vr.length, cs: vc.length, master: ca, atMaster: ar === ca.row && ac === ca.col,
+          mb: { top: edge(ca.row, ca.col).top, left: edge(ca.row, ca.col).left, bottom: edge(cb.row, ca.col).bottom, right: edge(ca.row, cb.col).right }
+        };
+      } catch (e) { }
     });
-    const R = Math.min(ws.rowCount || 1, 500), C = Math.min(ws.columnCount || 1, 60);
-    let cols = gut ? '<col style="width:48px">' : '';
-    for (let c = 1; c <= C; c++) { const col = ws.getColumn(c); if (col.hidden) continue; cols += `<col style="width:${Math.round((col.width || 8.43) * 7 + 5)}px">`; }
-    let h = `<table class="xt"><colgroup>${cols}</colgroup>`;
+    let cols = gut ? '<col style="width:48px">' : '', totW = gut ? 48 : 0;
+    for (let c = 1; c <= C; c++) { if (!colVis(c)) continue; const w = colPx(c); totW += w; cols += `<col style="width:${w}px">`; }
+    let h = `<table class="xt" style="width:${totW}px"><colgroup>${cols}</colgroup>`;
     for (let r = 1; r <= R; r++) {
       const row = ws.getRow(r); if (row.hidden) continue;
-      const kr = (op && op.keyOf[r]) || r, trs = `<tr data-mk="xr_${si}_${kr}" style="height:${row.height ? Math.round(row.height * 1.33) : 20}px">`;
+      const kr = (op && op.keyOf[r]) || r, trs = `<tr data-mk="xr_${si}_${kr}" style="height:${rowPx(r)}px">`;
       let rh = '', rowEd = false;
       for (let c = 1; c <= C; c++) {
-        if (ws.getColumn(c).hidden || covered.has(r + ',' + c)) continue;
-        const cell = ws.getCell(r, c); const m = merges[cell.address];
+        if (!colVis(c) || covered.has(r + ',' + c)) continue;
+        const m = merges[r + ',' + c];
+        const cell = m ? m.master : ws.getCell(r, c);
         let text = ''; try { text = cell.text || ''; } catch (e) { }
         try {
           let nv = cell.value; if (nv && typeof nv === 'object' && 'result' in nv) nv = nv.result;
           if (typeof nv === 'number') { const ft = fmtNum(nv, cell.numFmt); if (ft !== null) text = ft; }
         } catch (e) { }
         const isF = cell.type === ExcelJS.ValueType.Formula;
-        const ed = !isF && (sheet.allowFilled || text === '');
+        const ed = !isF && !(m && !m.atMaster) && (sheet.allowFilled || text === '');
         const span = (m ? ` colspan="${m.cs}" rowspan="${m.rs}"` : '') + (cfSet.has(r + ',' + c) ? ` data-cf="${si}:${r},${c}"` : '');
         if (!ed) {
           const fm = isF && S.fms[r + ',' + c] ? ` fm" data-fs="${si}" data-fr="${r}" data-fc="${c}" data-fnf="${esc(cell.numFmt || '')}` : '';
-          rh += `<td class="lk${fm}"${span} style="${xStyle(cell)}">${esc(text)}</td>`; continue;
+          rh += `<td class="lk${fm}"${span} style="${xStyle(cell, m && m.mb)}">${esc(text)}</td>`; continue;
         }
         const kaddr = ws.getColumn(c).letter + (typeof kr === 'string' ? '@' + kr : kr); S.kp[kaddr] = [r, c]; rowEd = true;
         const loc = { kind: 'x', si, addr: kaddr, pr: r, pc: c };
@@ -692,7 +727,7 @@ async function renderXlsx(bytes, sheet, ro) {
           inner = `<select><option value=""></option>${opts.map(o => `<option>${esc(o)}</option>`).join('')}</select>`;
         }
         const nfAttr = (cell.numFmt && fmtNum(1234.5, cell.numFmt) !== null) ? ` data-nf="${esc(cell.numFmt)}"` : '';
-        rh += `<td class="ed"${span}${nfAttr} style="${xStyle(cell)}" data-k="x_${si}_${kaddr}" data-loc="${esc(JSON.stringify(loc))}" data-label="${esc(ws.name + ' ' + cell.address)}">${inner}</td>`;
+        rh += `<td class="ed"${span}${nfAttr} style="${xStyle(cell, m && m.mb)}" data-k="x_${si}_${kaddr}" data-loc="${esc(JSON.stringify(loc))}" data-label="${esc(ws.name + ' ' + cell.address)}">${inner}</td>`;
       }
       let gh = '';
       if (gut) {
