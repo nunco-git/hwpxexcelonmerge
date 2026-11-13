@@ -157,6 +157,8 @@ if (!window.firebase || FIREBASE_CONFIG.apiKey.startsWith('YOUR')) {
 firebase.initializeApp(FIREBASE_CONFIG);
 const auth = firebase.auth();
 const db = firebase.firestore();
+/* 읽기 건수 절약: 브라우저에 캐시를 두어, 다시 접속할 때 이미 받은 입력 칸은 다시 읽지 않고 바뀐 것만 읽는다 */
+try { db.enablePersistence({ synchronizeTabs: true }).catch(() => { }); } catch (e) { }
 db.settings({ ignoreUndefinedProperties: true, experimentalAutoDetectLongPolling: true, merge: true });
 const TS = firebase.firestore.FieldValue.serverTimestamp;
 
@@ -1643,7 +1645,8 @@ async function participantMain(u) {
   let allRows = [], allCells = {}, rowSig = null, rowsReady = false, dirty = false, building = false, pendingFocus = null, pendingPaste = null, marks = {}, lastMark = null, hideDel = false, claims = {};
   let presMine = null, presT = null, presBeat = null, presDocs = {};
   const presRef = ref.collection('presence').doc(u.uid);
-  const presSet = k => presRef.set({ k, name: me.name, dept: me.dept, ms: Date.now(), at: TS() }).catch(() => { });
+  /* '입력 중' 표시는 접속자가 서로의 표시 변경을 계속 읽어 읽기 건수를 크게 늘리므로 기본은 끔(양식 문서에 showPresence:true 를 넣을 때만 사용) */
+  const presSet = k => { if (sheet.showPresence !== true) return; return presRef.set({ k, name: me.name, dept: me.dept, ms: Date.now(), at: TS() }).catch(() => { }); };
   const applyPresence = () => {
     const vb = $('#vbox'); if (!vb) return;
     vb.querySelectorAll('td[data-pres]').forEach(t => { t.removeAttribute('data-pres'); t.style.outline = ''; });
@@ -1798,7 +1801,7 @@ async function participantMain(u) {
       } finally { b.disabled = false; }
     });
     subs.push(ref.collection('cells').onSnapshot(s => { s.docChanges().forEach(ch => { if (ch.type !== 'removed') { const dt = ch.doc.data({ serverTimestamps: 'estimate' }); allCells[ch.doc.id] = dt; if (view) view.update(ch.doc.id, dt); } }); renderMine(); }, e => toast('입력 내용을 불러오지 못했습니다 [' + (e.code || '') + ']')));
-    subs.push(ref.collection('presence').onSnapshot(s => { presDocs = {}; s.forEach(d => presDocs[d.id] = d.data()); applyPresence(); }, () => { }));
+    if (sheet.showPresence === true) subs.push(ref.collection('presence').onSnapshot(s => { presDocs = {}; s.forEach(d => presDocs[d.id] = d.data()); applyPresence(); }, () => { }));
     subs.push(ref.collection('marks').onSnapshot(s => { marks = {}; s.forEach(d => marks[d.id] = d.data()); applyMarks(vbox, marks); }, () => { }));
     const claimsOf = () => Object.keys(claims).filter(k => claims[k].uid === u.uid).map(Number);
     const showUnits = () => {
