@@ -36,6 +36,14 @@ table.xt td,table.ht td{white-space:pre-wrap;word-break:break-all;padding:2px 4p
 table.ht{margin:8px;table-layout:auto}
 table.ht td{border:1px solid #999}
 table.ht td.lk{background:#f6f6f6}
+.fbtn{float:right;margin-left:4px;padding:0 3px;font-size:10px;line-height:16px;color:#6b7280;background:#e5e7eb;border:1px solid #cbd5e1;border-radius:3px;cursor:pointer;user-select:none}
+.fbtn.on{color:#fff;background:#2563eb;border-color:#2563eb}
+.fpop{position:fixed;z-index:9999;width:240px;max-height:380px;display:flex;flex-direction:column;background:#fff;border:1px solid #94a3b8;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:13px;color:#111}
+.fpop input[type=text]{margin:8px;padding:5px 7px;border:1px solid #cbd5e1;border-radius:5px}
+.fpop .fl{flex:1;overflow:auto;padding:0 8px 4px}
+.fpop label{display:flex;gap:6px;align-items:center;padding:2px 0;font-weight:400;white-space:nowrap}
+.fpop .fa{display:flex;gap:6px;padding:8px;border-top:1px solid #e5e7eb;flex-wrap:wrap}
+.fpop .fa button{padding:4px 9px;font-size:12px}
 td.ed{cursor:text;outline:1px dashed #93c5fd;outline-offset:-1px}
 td.ed:focus{outline:2px solid #2563eb;background:#eff6ff!important}
 td.ed select{width:100%;border:0;background:transparent}
@@ -642,6 +650,75 @@ function keyToAddr(addr, op) {
   if (m[3]) { const r = op && op.pos[m[3]]; return r ? m[1] + r : null; }
   return m[1] + (op ? (op.F[+m[2]] || +m[2]) : +m[2]);
 }
+/* ---------- 엑셀 자동 필터 ---------- */
+function afRange(ws) {
+  try {
+    const a = ws.autoFilter; if (!a) return null;
+    if (typeof a === 'string') { const m = /^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$/.exec(a.trim()); if (!m) return null; const cn = x => x.split('').reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0); return { r1: +m[2], c1: cn(m[1]), r2: +(m[4] || m[2]), c2: cn(m[3] || m[1]) }; }
+    if (a.from && a.to) {
+      const col = x => typeof x.column === 'number' ? x.column : (typeof x.col === 'number' ? x.col : ws.getCell(x.address || 'A1').col);
+      return { r1: a.from.row, c1: col(a.from), r2: a.to.row, c2: col(a.to) };
+    }
+  } catch (e) { }
+  return null;
+}
+const FLT = {};
+function fltAllVals(f, c) { const s = new Set(); for (let r = f.hdr + 1; r <= f.r2; r++) s.add(f.cols[c][r] || ''); return s; }
+function fltInit(f) {
+  const st = {};
+  for (let c = f.c1; c <= f.c2; c++) { const s = new Set(); for (let r = f.hdr + 1; r <= f.r2; r++) if (!f.hid[r]) s.add(f.cols[c][r] || ''); st[c] = s; }
+  return st;
+}
+function fltApply(pane) {
+  const f = pane._filt; if (!f) return; const st = FLT[f.sig];
+  pane.querySelectorAll('tr[data-fr]').forEach(tr => {
+    const r = +tr.dataset.fr; if (r <= f.hdr || r > f.r2) return;
+    let hide;
+    if (!st) hide = !!f.hid[r];
+    else { hide = false; for (const c in st) if (!st[c].has(f.cols[c][r] || '')) { hide = true; break; } }
+    tr.style.display = hide ? 'none' : '';
+  });
+  pane.querySelectorAll('.fbtn').forEach(b => {
+    const c = +b.dataset.fcol; let on = false;
+    if (st) on = st[c].size < fltAllVals(f, c).size; else { on = f.hid.some(Boolean) && fltInit(f)[c].size < fltAllVals(f, c).size; }
+    b.classList.toggle('on', on);
+  });
+}
+function fltClose() { document.querySelectorAll('.fpop').forEach(x => x.remove()); }
+function fltOpen(btn) {
+  const pane = btn.closest('.pane'), f = pane && pane._filt; if (!f) return;
+  fltClose();
+  const c = +btn.dataset.fcol, cnt = new Map();
+  for (let r = f.hdr + 1; r <= f.r2; r++) { const v = f.cols[c][r] || ''; cnt.set(v, (cnt.get(v) || 0) + 1); }
+  const cur = (FLT[f.sig] || fltInit(f))[c];
+  const keys = [...cnt.keys()].sort((x, y) => x === '' ? 1 : y === '' ? -1 : x.localeCompare(y, 'ko', { numeric: true })).slice(0, 2000);
+  const pop = document.createElement('div'); pop.className = 'fpop';
+  pop.innerHTML = `<input type="text" placeholder="검색"><div class="fl"><label><input type="checkbox" class="fall"> (모두 선택)</label>${keys.map((k, i) => `<label data-t="${esc(k.toLowerCase())}"><input type="checkbox" class="fi" data-i="${i}"${cur.has(k) ? ' checked' : ''}> ${k === '' ? '(빈 셀)' : esc(k.length > 40 ? k.slice(0, 40) + '…' : k)} <span style="color:#9ca3af">${cnt.get(k)}</span></label>`).join('')}</div><div class="fa"><button class="pri" data-a="ok">확인</button><button data-a="cancel">취소</button><button data-a="all" title="필터를 풀고 모든 행 표시">모두 표시</button><button data-a="orig" title="파일에 저장된 원래 필터 상태로 되돌림">원래대로</button></div>`;
+  document.body.appendChild(pop);
+  const br = btn.getBoundingClientRect(); pop.style.left = Math.max(4, Math.min(br.left, innerWidth - 250)) + 'px'; pop.style.top = Math.min(br.bottom + 4, Math.max(4, innerHeight - 390)) + 'px';
+  const items = [...pop.querySelectorAll('.fi')], all = pop.querySelector('.fall');
+  const sync = () => { all.checked = items.every(x => x.checked); };
+  sync();
+  all.onchange = () => pop.querySelectorAll('label[data-t]').forEach(l => { if (l.style.display !== 'none') l.querySelector('.fi').checked = all.checked; });
+  items.forEach(x => x.onchange = sync);
+  pop.querySelector('input[type=text]').oninput = e => { const q = e.target.value.trim().toLowerCase(); pop.querySelectorAll('label[data-t]').forEach(l => l.style.display = !q || l.dataset.t.includes(q) ? '' : 'none'); };
+  pop.querySelector('.fa').onclick = e => {
+    const a = e.target.dataset.a; if (!a) return;
+    if (a === 'ok') {
+      const st = FLT[f.sig] || (FLT[f.sig] = fltInit(f));
+      const chosen = new Set(); items.forEach(x => { if (x.checked) chosen.add(keys[+x.dataset.i]); });
+      cnt.forEach((n, k) => { if (!keys.includes(k) && cur.has(k)) chosen.add(k); });
+      st[c] = chosen;
+    } else if (a === 'all') { const st = {}; for (let k = f.c1; k <= f.c2; k++) st[k] = fltAllVals(f, k); FLT[f.sig] = st; }
+    else if (a === 'orig') delete FLT[f.sig];
+    fltClose(); fltApply(pane);
+  };
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('.fbtn');
+  if (b) { e.preventDefault(); e.stopPropagation(); fltOpen(b); return; }
+  if (!(e.target.closest && e.target.closest('.fpop'))) fltClose();
+});
 async function renderXlsx(bytes, sheet, ro) {
   const wb = new ExcelJS.Workbook(); await wb.xlsx.load(bytes);
   const ops = applyRowOps(wb, (ro && ro.rows) || []), gut = !!(ro && ro.gutter);
@@ -671,7 +748,19 @@ async function renderXlsx(bytes, sheet, ro) {
       S.cf.forEach(x => String(x.ref).split(/\s+/).forEach(t => { const g = parseCfRange(t); if (g && (g.r2 - g.r1 + 1) * (g.c2 - g.c1 + 1) <= 20000) for (let r = g.r1; r <= g.r2; r++) for (let c = g.c1; c <= g.c2; c++) cfSet.add(r + ',' + c); }));
     } catch (e) { S.cf = []; }
     if (ws.state && ws.state !== 'visible') return;
-    const R = Math.min(ws.rowCount || 1, 500), C = Math.min(ws.columnCount || 1, 60);
+    const R = Math.min(ws.rowCount || 1, 5000), C = Math.min(ws.columnCount || 1, 60);
+    /* 자동 필터: 범위를 읽고, 필터로 숨겨진 행도 화면에 남겨 두어 사용자가 다시 필터링할 수 있게 한다(행 삽입 시트는 제외) */
+    const AF = op ? null : afRange(ws);
+    let filt = null;
+    if (AF && AF.r2 > AF.r1) {
+      const c1 = Math.max(1, AF.c1), c2 = Math.min(AF.c2, C), r2 = Math.min(AF.r2, R);
+      filt = { sig: ws.name + '|' + AF.r1 + ':' + c1 + '-' + AF.r2 + ':' + c2, hdr: AF.r1, r2, c1, c2, cols: {}, hid: [] };
+      for (let c = c1; c <= c2; c++) filt.cols[c] = [];
+      for (let r = AF.r1 + 1; r <= r2; r++) {
+        const rw = ws.getRow(r); filt.hid[r] = !!rw.hidden;
+        for (let c = c1; c <= c2; c++) { let t = ''; try { t = ws.getCell(r, c).text || ''; } catch (e) { } filt.cols[c][r] = String(t).trim(); }
+      }
+    }
     const defW = (ws.properties && ws.properties.defaultColWidth) || 8.43, defH = (ws.properties && ws.properties.defaultRowHeight) || 15;
     const colPx = c => Math.round((ws.getColumn(c).width || defW) * 7 + 5);
     const rowPx = r => { const rw = ws.getRow(r); return Math.round((rw.height || defH) * 1.333); };
@@ -699,8 +788,8 @@ async function renderXlsx(bytes, sheet, ro) {
     for (let c = 1; c <= C; c++) { if (!colVis(c)) continue; const w = colPx(c); totW += w; cols += `<col style="width:${w}px">`; }
     let h = `<table class="xt" style="width:${totW}px"><colgroup>${cols}</colgroup>`;
     for (let r = 1; r <= R; r++) {
-      const row = ws.getRow(r); if (row.hidden) continue;
-      const kr = (op && op.keyOf[r]) || r, trs = `<tr data-mk="xr_${si}_${kr}" style="height:${rowPx(r)}px">`;
+      const row = ws.getRow(r); const fhid = !!row.hidden; if (fhid && !(filt && r > filt.hdr && r <= filt.r2)) continue;
+      const kr = (op && op.keyOf[r]) || r, trs = `<tr data-mk="xr_${si}_${kr}" data-fr="${r}"${fhid ? ' data-fh="1"' : ''} style="height:${rowPx(r)}px${fhid ? ';display:none' : ''}">`;
       let rh = '', rowEd = false;
       for (let c = 1; c <= C; c++) {
         if (!colVis(c) || covered.has(r + ',' + c)) continue;
@@ -716,7 +805,8 @@ async function renderXlsx(bytes, sheet, ro) {
         const span = (m ? ` colspan="${m.cs}" rowspan="${m.rs}"` : '') + (cfSet.has(r + ',' + c) ? ` data-cf="${si}:${r},${c}"` : '');
         if (!ed) {
           const fm = isF && S.fms[r + ',' + c] ? ` fm" data-fs="${si}" data-fr="${r}" data-fc="${c}" data-fnf="${esc(cell.numFmt || '')}` : '';
-          rh += `<td class="lk${fm}"${span} style="${xStyle(cell, m && m.mb)}">${esc(text)}</td>`; continue;
+          const fb = (filt && r === filt.hdr && c >= filt.c1 && c <= filt.c2) ? `<span class="fbtn" data-fcol="${c}" title="필터">▼</span>` : '';
+          rh += `<td class="lk${fm}"${span} style="${xStyle(cell, m && m.mb)}">${esc(text)}${fb}</td>`; continue;
         }
         const kaddr = ws.getColumn(c).letter + (typeof kr === 'string' ? '@' + kr : kr); S.kp[kaddr] = [r, c]; rowEd = true;
         const loc = { kind: 'x', si, addr: kaddr, pr: r, pc: c };
@@ -737,7 +827,7 @@ async function renderXlsx(bytes, sheet, ro) {
       h += trs + gh + rh + '</tr>';
     }
     h += '</table>';
-    panes.push({ name: ws.name, html: h });
+    panes.push({ name: ws.name, html: h, filt });
   });
   return { panes, calc };
 }
@@ -1038,6 +1128,7 @@ function mountView(box, r, opt) {
     box.querySelectorAll('[data-tab]').forEach(x => x.classList.toggle('on', x === b));
     box.querySelectorAll('.pane').forEach(p => p.style.display = p.dataset.pane === b.dataset.tab ? '' : 'none');
   });
+  box.querySelectorAll('.pane').forEach((p, i) => { p._filt = r.panes[i] && r.panes[i].filt; if (p._filt) fltApply(p); });
   const tds = [...box.querySelectorAll('td.ed')];
   const byKey = new Map(tds.map(td => [td.dataset.k, td]));
   box.querySelectorAll('td.ed, td[data-cf]').forEach(td => { td.dataset.obg = td.style.background || ''; td.dataset.ocol = td.style.color || ''; td.dataset.ofw = td.style.fontWeight || ''; td.dataset.ofs = td.style.fontStyle || ''; });
@@ -1218,7 +1309,7 @@ function mountView(box, r, opt) {
         if (e.altKey) { if (!document.execCommand('insertLineBreak')) document.execCommand('insertText', false, '\n'); return; }
         if ((e.ctrlKey || e.metaKey) && opt.onAppend) { td.blur(); opt.onAppend(td); return; }
         if (!e.shiftKey && opt.onAppend && !neighbor(td, 'down') && !(td.closest('tr') && td.closest('tr').nextElementSibling)) { td.blur(); opt.onAppend(td); return; }
-        const eds = [...(td.closest('.pane') || box).querySelectorAll('td.ed')];
+        const eds = [...(td.closest('.pane') || box).querySelectorAll('td.ed')].filter(x => x.offsetParent !== null);
         const nx = neighbor(td, e.shiftKey ? 'up' : 'down') || eds[eds.indexOf(td) + (e.shiftKey ? -1 : 1)];
         if (nx) goTo(td, nx); else td.blur();
       } else if (DIR[e.key] && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
